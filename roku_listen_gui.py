@@ -18,6 +18,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -107,6 +108,42 @@ class Remote:
     def close_player(cls, host):
         """Clear Playlet's queue, which also closes its player and returns to Playlet's home screen."""
         cls._open(f"http://{host}:8888/api/queue", headers={"X-Playlet": "1"}, method="DELETE")
+
+
+class KeySender:
+    """Sends keypresses to the Roku one at a time, in order.
+
+    Typing needs a single queue: a thread per key (like the transport buttons use) lets the HTTP requests
+    overtake each other, so "hello" could arrive as "hlelo".
+    """
+
+    def __init__(self, host_fn):
+        self.host_fn, self.error = host_fn, ""
+        self.q = queue.Queue()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def key(self, name):
+        self.q.put(name)
+
+    def text(self, s):
+        for ch in s:
+            if ch.isprintable():
+                self.q.put("Lit_" + urllib.parse.quote(ch, safe=""))   # ECP takes one URL-encoded char per press
+
+    def _run(self):
+        while True:
+            name = self.q.get()
+            try:
+                Remote.key(self.host_fn(), name)
+                self.error = ""
+            except Exception as e:
+                log(f"keypress {name} failed: {e!r}")
+                if isinstance(e, urllib.error.HTTPError) and e.code == 403:
+                    self.error = "Roku blocked typing: allow Control by mobile apps"
+                else:
+                    self.error = "Can't reach the Roku"
+                with self.q.mutex:          # don't sit through a 3 s timeout for every queued key
+                    self.q.queue.clear()
 
 
 class CastSync:
@@ -613,6 +650,86 @@ class Toggle(tk.Canvas):
         self.create_oval(cx - r + 4, 4, cx + r - 4, self.h - 4, fill="#ffffff", outline="")
 
 
+# Tk keysym -> Roku ECP key for the non-text keys the Type box forwards; the value's glyph is shown as feedback
+ECP_KEYS = {
+    "Up": ("Up", "↑"), "Down": ("Down", "↓"), "Left": ("Left", "←"), "Right": ("Right", "→"),
+    "Return": ("Select", "OK"), "KP_Enter": ("Select", "OK"), "Escape": ("Back", "Back"),
+    "BackSpace": ("Backspace", "⌫"), "Delete": ("Backspace", "⌫"),
+}
+CTRL, ALT = 0x4, 0x20000   # Tk event.state bits on Windows (AltGr arrives as Ctrl+Alt)
+
+
+class TypeBox(tk.Frame):
+    """Click it, then type: text goes into whatever text field is open on the TV, and arrows / Enter / Esc
+    work the TV's menus like the remote's d-pad, OK and Back."""
+
+    def __init__(self, parent, sender, width=328, height=58):
+        super().__init__(parent, bg=CARD, width=width, height=height, highlightthickness=1, takefocus=1,
+                         highlightbackground=EDGE, highlightcolor=ACCENT, cursor="xterm")
+        self.pack_propagate(False)
+        self.sender, self.typed, self.last = sender, "", ""
+        self.line = tk.Label(self, bg=CARD, font=(FONT, 11), anchor="w")
+        self.hint = tk.Label(self, bg=CARD, font=(FONT, 8), anchor="w")
+        self.line.pack(fill="x", padx=12, pady=(8, 0))
+        self.hint.pack(fill="x", padx=12)
+        for w in (self, self.line, self.hint):
+            w.bind("<Button-1>", lambda e: self.focus_set())
+        self.bind("<KeyPress>", self._key)
+        self.bind("<FocusIn>", lambda e: self.render())
+        self.bind("<FocusOut>", lambda e: self.render())
+        self.render()
+
+    def owns(self, widget):
+        return widget in (self, self.line, self.hint)
+
+    def _key(self, e):
+        if e.keysym in ("Tab", "ISO_Left_Tab"):
+            return None                                   # keep normal focus traversal
+        if e.state & CTRL and not e.state & ALT:
+            if e.keysym.lower() == "v":
+                self._paste()
+            return "break"
+        if e.keysym in ECP_KEYS:
+            name, self.last = ECP_KEYS[e.keysym]
+            self.sender.key(name)
+            if name == "Backspace":
+                self.typed = self.typed[:-1]
+            elif name in ("Select", "Back"):
+                self.typed = ""                           # that text is done; start fresh next time
+        elif e.char and e.char.isprintable():
+            self.sender.text(e.char)
+            self.typed, self.last = self.typed + e.char, ""
+        else:
+            return None                                   # Shift, F-keys, etc.
+        self.render()
+        return "break"
+
+    def _paste(self):
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            return
+        text = " ".join(text.split())                     # newlines / tabs can't be typed into a TV field
+        self.sender.text(text)
+        self.typed, self.last = self.typed + text, "paste"
+        self.render()
+
+    def render(self):
+        focused = self.focus_get() is self
+        if self.typed or focused:
+            shown = self.typed if len(self.typed) <= 30 else "…" + self.typed[-29:]
+            self.line.config(text=shown + ("▏" if focused else ""), fg=FG)
+        else:
+            self.line.config(text="Click here to type on the TV", fg=MUTED)
+        if self.sender.error:
+            self.hint.config(text=self.sender.error, fg=RED)
+        elif focused:
+            last = f"  ·  sent {self.last}" if self.last else ""
+            self.hint.config(text=f"Arrows move · Enter = OK · Esc = Back{last}", fg=MUTED)
+        else:
+            self.hint.config(text="Search and sign-in boxes, Ctrl+V pastes", fg=MUTED)
+
+
 class NavButton(tk.Canvas):
     """Small round browser button: back, fwd, reload."""
 
@@ -784,7 +901,7 @@ class App(tk.Tk):
         col.place(relx=0.5, rely=0.47, anchor="center")
         tk.Label(col, text="TV audio", bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(anchor="w")
         tk.Label(col, text="Roku private listening, on this PC", bg=BG, fg=MUTED,
-                 font=(FONT, 10)).pack(anchor="w", pady=(0, 18))
+                 font=(FONT, 10)).pack(anchor="w", pady=(0, 14))
 
         card = tk.Frame(col, bg=CARD, highlightbackground=EDGE, highlightthickness=1)
         card.pack(fill="x")
@@ -813,8 +930,15 @@ class App(tk.Tk):
             btn = self.play_btn if kind is None else IconButton(trow, kind, action)
             btn.pack(side="left", padx=(0 if i == 0 else 9, 0))
         self.now = tk.Label(col, text="Nothing playing", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
-        self.now.pack(fill="x", pady=(8, 18))
+        self.now.pack(fill="x", pady=(8, 14))
         self.play_state, self._polling = "none", False
+
+        tk.Label(col, text="Type on TV", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
+        self.keys = KeySender(lambda: self._host)
+        self.typebox = TypeBox(col, self.keys)
+        self.typebox.pack(pady=(4, 16))
+        # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
+        self.bind_all("<Button-1>", self._click_away, add="+")
 
         vrow = tk.Frame(col, bg=BG)
         vrow.pack(fill="x")
@@ -945,6 +1069,13 @@ class App(tk.Tk):
             time_txt = f"  ·  {fmt(st['pos'])} / {fmt(st['dur'])}" if st["dur"] else ""
             self.now.config(text=f"{st['app'] or 'Roku'}  ·  {label}{time_txt}")
         self.play_btn.set_kind("pause" if self.play_state == "play" else "play")
+        self.typebox.render()   # picks up typing errors reported by the sender thread
+
+    def _click_away(self, e):
+        w = e.widget
+        if isinstance(w, tk.Misc) and not self.typebox.owns(w) and not isinstance(w, tk.Entry) \
+                and self.focus_get() is self.typebox:
+            self.focus_set()
 
     def _field(self, parent, label, var, width, pad=(0, 0)):
         box = tk.Frame(parent, bg=BG)

@@ -57,6 +57,7 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 |---|---|
 | 🎧 **TV audio on your PC** | Roku private listening over Wi-Fi, with a live volume slider (0–200 %) and adjustable buffer delay |
 | ⏯️ **Remote control** | Play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
+| ⌨️ **Type on TV** | Type into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus |
 | ▶️ **Embedded YouTube** | Your own Chrome profile (login, extensions, dark mode) inside the app window |
 | 📺 **Auto-cast sync** | Play, pause, scrub, autoplay-next and Shorts mirror to the TV; going back to Home sends Playlet back to its home screen |
 | 🎯 **Latency compensation** | Learns how long Playlet takes to rebuffer and aims seeks ahead, then keeps the PC player locked to the TV's timeline |
@@ -105,6 +106,7 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 2. Adjust **Volume** live. Everything above 100 % is a boost.
 3. **Delay ms** sets the Roku-side buffer. Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles.
 4. The transport buttons control whatever is playing on the Roku.
+5. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
 
 ### YouTube tab
 
@@ -175,7 +177,7 @@ roku-listen/
 | Status says **Reload Playlet Cast in chrome://extensions** | Check that the extension is loaded and **Developer mode** is on, then click its reload icon. |
 | **Port 8765 is busy** | Another copy of Roku Listen is running. Close it. Opening the app again normally just brings the existing window forward. |
 | **Can't reach Playlet on the Roku** | Open Playlet on the TV and check the Roku IP. |
-| Remote buttons do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
+| Remote buttons or **Type on TV** do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
 | Connected but no sound | Allow Roku Listen through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
 | Crackling audio | Raise **Delay ms** (try 500–700). |
 
