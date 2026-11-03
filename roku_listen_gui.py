@@ -578,19 +578,44 @@ class RoundButton(tk.Canvas):
 
 
 class IconButton(tk.Canvas):
-    """Small rounded transport button with a drawn icon: back, back10, rev, play, pause, fwd, fwd10."""
+    """Small rounded button with a drawn icon: back, back10, rev, play, pause, fwd, fwd10, up, down, left,
+    right, ok. With repeat=True, holding it down repeats the command like a held remote button."""
 
-    def __init__(self, parent, kind, command, width=58, height=44):
+    REPEAT_DELAY, REPEAT_EVERY = 400, 140   # ms, roughly like holding a real Roku remote's arrow
+
+    def __init__(self, parent, kind, command, width=58, height=44, repeat=False):
         super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
         self.w, self.h, self.kind, self.command, self.hot = width, height, kind, command, False
+        self.repeat, self.down, self._job = repeat, False, None
         self.bind("<Enter>", lambda e: self._hot(True))
-        self.bind("<Leave>", lambda e: self._hot(False))
-        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Leave>", lambda e: (self._up(), self._hot(False)))
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<ButtonRelease-1>", lambda e: self._up())
         self.draw()
 
     def _hot(self, on):
         self.hot = on
         self.draw()
+
+    def _press(self, e):
+        self.down = True
+        self.draw()
+        self.command()
+        if self.repeat:
+            self._job = self.after(self.REPEAT_DELAY, self._again)
+
+    def _again(self):
+        if self.down:
+            self.command()
+            self._job = self.after(self.REPEAT_EVERY, self._again)
+
+    def _up(self):
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
+        if self.down:
+            self.down = False
+            self.draw()
 
     def set_kind(self, kind):
         if kind != self.kind:
@@ -603,9 +628,18 @@ class IconButton(tk.Canvas):
 
     def draw(self):
         self.delete("all")
-        rounded(self, 1, 1, self.w - 1, self.h - 1, 12, fill="#26262b" if self.hot else "#151518", outline=EDGE)
+        fill = "#34343a" if self.down else "#26262b" if self.hot else "#151518"
+        rounded(self, 1, 1, self.w - 1, self.h - 1, 12, fill=fill, outline=EDGE)
         cx, cy, k = self.w / 2, self.h / 2, self.kind
-        if k == "back":   # the Roku remote's U-turn arrow: points left on top, hooks down on the right
+        if k in ("up", "down"):   # same solid triangles as play / rev / fwd, turned upright
+            d = -1 if k == "up" else 1
+            self.create_polygon(cx - 8, cy - d * 4.5, cx + 8, cy - d * 4.5, cx, cy + d * 5.5, fill=FG, outline="")
+        elif k in ("left", "right"):
+            d = 1 if k == "right" else -1
+            self.create_polygon(cx - d * 4.5, cy - 8, cx - d * 4.5, cy + 8, cx + d * 5.5, cy, fill=FG, outline="")
+        elif k == "ok":
+            self.create_text(cx, cy, text="OK", fill=FG, font=(FONT, 11, "bold"))
+        elif k == "back":   # the Roku remote's U-turn arrow: points left on top, hooks down on the right
             self.create_line(cx - 9, cy - 4, cx + 3, cy - 4, cx + 9, cy - 4, cx + 9, cy + 6, cx + 3, cy + 6,
                              cx - 3, cy + 6, smooth=True, width=2.5, fill=FG, capstyle="round",
                              arrow="first", arrowshape=(7, 8, 4))
@@ -622,84 +656,19 @@ class IconButton(tk.Canvas):
                 self.create_rectangle(cx + dx, cy - 8, cx + dx + 5, cy + 8, fill=FG, outline="")
 
 
-class DPad(tk.Canvas):
-    """The Roku remote's purple ring: four arrow segments around an OK button. Holding an arrow repeats it."""
+class DPad(tk.Frame):
+    """The remote's arrows and OK as a cross of square buttons, styled like the transport row."""
 
-    RING, RING_HOT, RING_DOWN = "#4b2a6b", "#5d3585", "#7a45ad"
-    REPEAT_DELAY, REPEAT_EVERY = 400, 140   # ms, roughly like holding a real remote's arrow
-
-    def __init__(self, parent, send, size=184):
-        super().__init__(parent, width=size, height=size, bg=BG, highlightthickness=0, cursor="hand2")
-        self.send, self.s = send, size
-        self.c, self.r_out, self.r_in = size / 2, size / 2 - 2, size * 0.2
-        self.hot = self.down = self._repeat = None
-        self.bind("<ButtonPress-1>", self._press)
-        self.bind("<ButtonRelease-1>", lambda e: self._release())
-        self.bind("<Motion>", lambda e: self._hover(self._hit(e.x, e.y)))
-        self.bind("<Leave>", lambda e: (self._release(), self._hover(None)))
-        self.draw()
-
-    def _hit(self, x, y):
-        dx, dy = x - self.c, self.c - y
-        r = (dx * dx + dy * dy) ** 0.5
-        if r <= self.r_in:
-            return "Select"
-        if r > self.r_out:
-            return None
-        if abs(dy) >= abs(dx):
-            return "Up" if dy > 0 else "Down"
-        return "Right" if dx > 0 else "Left"
-
-    def _hover(self, part):
-        if part != self.hot:
-            self.hot = part
-            self.draw()
-
-    def _press(self, e):
-        part = self._hit(e.x, e.y)
-        if not part:
-            return
-        self.down = part
-        self.draw()
-        self.send(part)
-        if part != "Select":   # OK doesn't auto-repeat on a Roku remote either
-            self._repeat = self.after(self.REPEAT_DELAY, self._again)
-
-    def _again(self):
-        if self.down:
-            self.send(self.down)
-            self._repeat = self.after(self.REPEAT_EVERY, self._again)
-
-    def _release(self):
-        if self._repeat:
-            self.after_cancel(self._repeat)
-            self._repeat = None
-        if self.down:
-            self.down = None
-            self.draw()
-
-    def _color(self, part, base, hot, down):
-        return down if self.down == part else hot if self.hot == part else base
-
-    def draw(self):
-        self.delete("all")
-        c, ro, ri = self.c, self.r_out, self.r_in
-        # each pie slice's own outline (in the background color) leaves the gaps between segments
-        for part, start in (("Right", -45), ("Up", 45), ("Left", 135), ("Down", 225)):
-            self.create_arc(c - ro, c - ro, c + ro, c + ro, start=start, extent=90, style="pieslice",
-                            fill=self._color(part, self.RING, self.RING_HOT, self.RING_DOWN), outline=BG, width=3)
-        ok = self._color("Select", "#151518", "#26262b", ACCENT)
-        self.create_oval(c - ri - 6, c - ri - 6, c + ri + 6, c + ri + 6, fill=BG, outline="")
-        self.create_oval(c - ri, c - ri, c + ri, c + ri, fill=ok, outline=EDGE)
-        self.create_text(c, c, text="OK", fill=FG, font=(FONT_MED, 12))
-        m, a = (ro + ri) / 2 + 3, 7   # chevrons sit midway around the ring
-        for (dx, dy) in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-            x, y = c + dx * m, c + dy * m
-            if dx:   # < or >
-                pts = (x - dx * a / 2, y - a, x + dx * a / 2, y, x - dx * a / 2, y + a)
-            else:    # ^ or v
-                pts = (x - a, y - dy * a / 2, x, y + dy * a / 2, x + a, y - dy * a / 2)
-            self.create_line(*pts, fill="#e9ddf5", width=2.5, capstyle="round", joinstyle="round")
+    # 3 x 54 + 2 x 8 = 178 px: the height of the status card + Connect + transport row it sits beside
+    def __init__(self, parent, send, size=54, gap=8):
+        super().__init__(parent, bg=BG)
+        self.buttons = {}
+        for kind, key, row, col in (("up", "Up", 0, 1), ("left", "Left", 1, 0), ("ok", "Select", 1, 1),
+                                    ("right", "Right", 1, 2), ("down", "Down", 2, 1)):
+            btn = IconButton(self, kind, lambda k=key: send(k), width=size, height=size,
+                             repeat=kind != "ok")   # OK doesn't auto-repeat on a Roku remote either
+            btn.grid(row=row, column=col, padx=(0 if col == 0 else gap, 0), pady=(0 if row == 0 else gap, 0))
+            self.buttons[key] = btn
 
 
 class Slider(tk.Canvas):
@@ -1078,7 +1047,7 @@ class App(tk.Tk):
         wrap = tk.Frame(page, bg=BG)
         wrap.place(relx=0.5, rely=0.47, anchor="center")
         col = tk.Frame(wrap, bg=BG)
-        col.pack(side="left")
+        col.pack(side="left", anchor="n")
         tk.Label(col, text="TV audio", bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(anchor="w")
         tk.Label(col, text="Roku private listening, on this PC", bg=BG, fg=MUTED,
                  font=(FONT, 10)).pack(anchor="w", pady=(0, 14))
@@ -1117,13 +1086,17 @@ class App(tk.Tk):
         tk.Label(col, text="Type on TV", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
         self.keys = KeySender(lambda: self._host)
 
-        # Roku-style D-pad beside the column (stacked below, it wouldn't fit the minimum window height)
-        pad = tk.Frame(wrap, bg=BG)
-        pad.pack(side="left", padx=(64, 0))
-        tk.Label(pad, text="Remote", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", pady=(0, 10))
-        self.dpad = DPad(pad, self.keys.key)
-        self.dpad.pack()
-        tk.Label(pad, text="Hold an arrow to repeat", bg=BG, fg=MUTED, font=(FONT, 8)).pack(pady=(10, 0))
+        # Remote column beside it (stacked below, it wouldn't fit the minimum window height). Same heading and
+        # subtitle as "TV audio", so both columns share one top edge and the D-pad lines up with the status card.
+        side = tk.Frame(wrap, bg=BG)
+        side.pack(side="left", anchor="n", padx=(64, 0))
+        tk.Label(side, text="Remote", bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(anchor="w")
+        tk.Label(side, text="Arrows and OK, like the Roku remote", bg=BG, fg=MUTED,
+                 font=(FONT, 10)).pack(anchor="w", pady=(0, 14))
+        self.dpad = DPad(side, self.keys.key)
+        self.dpad.pack(anchor="w")
+        tk.Label(side, text="Hold an arrow to repeat", bg=BG, fg=MUTED, font=(FONT, 9),
+                 anchor="w").pack(fill="x", pady=(8, 0))   # same spacing as the "now playing" line opposite
         self.typebox = TypeBox(col, self.keys)
         self.typebox.pack(pady=(4, 16))
         # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
