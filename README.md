@@ -22,7 +22,34 @@
 - **YouTube on the TV, driven from your PC.** The YouTube tab is your real Chrome, with your login and all your extensions, embedded in the app. Pick a video and it plays on the TV. Pause, scrub, or switch videos, and the TV follows.
 
 > [!IMPORTANT]
-> **[Playlet](https://github.com/iBicha/playlet) must be installed on your Roku** for the YouTube tab, auto-cast and ±10 s seeking. Playlet is a free, open-source YouTube client for Roku. Add it from the Roku Channel Store by searching for **Playlet**, and keep it open on the TV while you use the YouTube tab.
+> **[Playlet](https://github.com/iBicha/playlet) must be installed on your Roku** for the YouTube tab, auto-cast and ±10 s seeking. Playlet is a free, open-source YouTube client for Roku. Install it from the [Roku Channel Store](https://channelstore.roku.com/details/4a41d0921265a5e31429a7679442153f:b5bcb5b630c28b01e93bf59856317b43/playlet), or search for **Playlet** on your Roku, and keep it open on the TV while you use the YouTube tab.
+
+## Why Playlet? A free, ad-free YouTube for your TV
+
+Roku Listen plays everything through **Playlet**, a free and open-source YouTube client for Roku. You get what people usually pay a subscription for, plus a few things no official app offers:
+
+- 🔥 **No ads, ever.** No pre-rolls and no unskippable mid-rolls. In the developer's words: *"Not now, not ever."*
+- ⚔️ **[SponsorBlock](https://sponsor.ajay.app/) built in.** Automatically skips sponsor reads, intros, "like and subscribe" reminders and other filler, using the community's crowd-sourced segments.
+- 🕵️ **No tracking, privacy-first.** Optionally route everything through an [Invidious](https://invidious.io/) backend so you never talk to Google directly.
+- 🙋 **Your accounts still work.** Sign in with your YouTube account (or Invidious) to keep your subscriptions and recommendations.
+- ⚡ **Fast.** Without the bloat it's quicker than the official Roku app ([see the comparison](https://youtu.be/qmSvA-QQW20)).
+- 🔮 **Picture-in-picture** on the TV.
+- 📱 **Cast from anywhere:** your phone's YouTube app, a browser, a TV link code, and now your PC through Roku Listen.
+- 💸 **Free and open source.** No subscription, no paywall, and the code is public ([AGPL-3.0](https://github.com/iBicha/playlet/blob/main/LICENSE)).
+
+| | Official YouTube app | YouTube Premium | **Playlet + Roku Listen** |
+|---|:---:|:---:|:---:|
+| Price | Free | Monthly subscription | **Free** |
+| Ads | Yes | None | **None** |
+| SponsorBlock (skip sponsors and filler) | ✗ | ✗ | **✓** |
+| Privacy (no tracking / Invidious option) | ✗ | ✗ | **✓** |
+| Use your YouTube account | ✓ | ✓ | **✓** |
+| Open source | ✗ | ✗ | **✓** |
+| Browse on your PC with your Chrome extensions, play on the TV | ✗ | ✗ | **✓** |
+| Hear the TV through your PC (private listening) | Phone app only | Phone app only | **✓** |
+
+> [!NOTE]
+> Playlet is an independent project by [iBicha](https://github.com/iBicha/playlet), and Roku Listen isn't affiliated with it. Feature claims above come from [Playlet's own README](https://github.com/iBicha/playlet#features). Like any Roku channel, Roku collects some usage data; Playlet's own telemetry can be turned off in its settings. If you want to support the creators you watch, channel memberships, Patreon and merch go straight to them.
 
 ## Features
 
