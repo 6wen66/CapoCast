@@ -622,6 +622,86 @@ class IconButton(tk.Canvas):
                 self.create_rectangle(cx + dx, cy - 8, cx + dx + 5, cy + 8, fill=FG, outline="")
 
 
+class DPad(tk.Canvas):
+    """The Roku remote's purple ring: four arrow segments around an OK button. Holding an arrow repeats it."""
+
+    RING, RING_HOT, RING_DOWN = "#4b2a6b", "#5d3585", "#7a45ad"
+    REPEAT_DELAY, REPEAT_EVERY = 400, 140   # ms, roughly like holding a real remote's arrow
+
+    def __init__(self, parent, send, size=184):
+        super().__init__(parent, width=size, height=size, bg=BG, highlightthickness=0, cursor="hand2")
+        self.send, self.s = send, size
+        self.c, self.r_out, self.r_in = size / 2, size / 2 - 2, size * 0.2
+        self.hot = self.down = self._repeat = None
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<ButtonRelease-1>", lambda e: self._release())
+        self.bind("<Motion>", lambda e: self._hover(self._hit(e.x, e.y)))
+        self.bind("<Leave>", lambda e: (self._release(), self._hover(None)))
+        self.draw()
+
+    def _hit(self, x, y):
+        dx, dy = x - self.c, self.c - y
+        r = (dx * dx + dy * dy) ** 0.5
+        if r <= self.r_in:
+            return "Select"
+        if r > self.r_out:
+            return None
+        if abs(dy) >= abs(dx):
+            return "Up" if dy > 0 else "Down"
+        return "Right" if dx > 0 else "Left"
+
+    def _hover(self, part):
+        if part != self.hot:
+            self.hot = part
+            self.draw()
+
+    def _press(self, e):
+        part = self._hit(e.x, e.y)
+        if not part:
+            return
+        self.down = part
+        self.draw()
+        self.send(part)
+        if part != "Select":   # OK doesn't auto-repeat on a Roku remote either
+            self._repeat = self.after(self.REPEAT_DELAY, self._again)
+
+    def _again(self):
+        if self.down:
+            self.send(self.down)
+            self._repeat = self.after(self.REPEAT_EVERY, self._again)
+
+    def _release(self):
+        if self._repeat:
+            self.after_cancel(self._repeat)
+            self._repeat = None
+        if self.down:
+            self.down = None
+            self.draw()
+
+    def _color(self, part, base, hot, down):
+        return down if self.down == part else hot if self.hot == part else base
+
+    def draw(self):
+        self.delete("all")
+        c, ro, ri = self.c, self.r_out, self.r_in
+        # each pie slice's own outline (in the background color) leaves the gaps between segments
+        for part, start in (("Right", -45), ("Up", 45), ("Left", 135), ("Down", 225)):
+            self.create_arc(c - ro, c - ro, c + ro, c + ro, start=start, extent=90, style="pieslice",
+                            fill=self._color(part, self.RING, self.RING_HOT, self.RING_DOWN), outline=BG, width=3)
+        ok = self._color("Select", "#151518", "#26262b", ACCENT)
+        self.create_oval(c - ri - 6, c - ri - 6, c + ri + 6, c + ri + 6, fill=BG, outline="")
+        self.create_oval(c - ri, c - ri, c + ri, c + ri, fill=ok, outline=EDGE)
+        self.create_text(c, c, text="OK", fill=FG, font=(FONT_MED, 12))
+        m, a = (ro + ri) / 2 + 3, 7   # chevrons sit midway around the ring
+        for (dx, dy) in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            x, y = c + dx * m, c + dy * m
+            if dx:   # < or >
+                pts = (x - dx * a / 2, y - a, x + dx * a / 2, y, x - dx * a / 2, y + a)
+            else:    # ^ or v
+                pts = (x - a, y - dy * a / 2, x, y + dy * a / 2, x + a, y - dy * a / 2)
+            self.create_line(*pts, fill="#e9ddf5", width=2.5, capstyle="round", joinstyle="round")
+
+
 class Slider(tk.Canvas):
     def __init__(self, parent, lo, hi, value, command, width=328, height=30):
         super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
@@ -995,8 +1075,10 @@ class App(tk.Tk):
         self.after(700, self._status_tick)
 
     def _build_listen(self, page):
-        col = tk.Frame(page, bg=BG)
-        col.place(relx=0.5, rely=0.47, anchor="center")
+        wrap = tk.Frame(page, bg=BG)
+        wrap.place(relx=0.5, rely=0.47, anchor="center")
+        col = tk.Frame(wrap, bg=BG)
+        col.pack(side="left")
         tk.Label(col, text="TV audio", bg=BG, fg=FG, font=(FONT, 20, "bold")).pack(anchor="w")
         tk.Label(col, text="Roku private listening, on this PC", bg=BG, fg=MUTED,
                  font=(FONT, 10)).pack(anchor="w", pady=(0, 14))
@@ -1034,6 +1116,14 @@ class App(tk.Tk):
 
         tk.Label(col, text="Type on TV", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
         self.keys = KeySender(lambda: self._host)
+
+        # Roku-style D-pad beside the column (stacked below, it wouldn't fit the minimum window height)
+        pad = tk.Frame(wrap, bg=BG)
+        pad.pack(side="left", padx=(64, 0))
+        tk.Label(pad, text="Remote", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", pady=(0, 10))
+        self.dpad = DPad(pad, self.keys.key)
+        self.dpad.pack()
+        tk.Label(pad, text="Hold an arrow to repeat", bg=BG, fg=MUTED, font=(FONT, 8)).pack(pady=(10, 0))
         self.typebox = TypeBox(col, self.keys)
         self.typebox.pack(pady=(4, 16))
         # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
