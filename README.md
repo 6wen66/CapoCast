@@ -56,7 +56,8 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 | | |
 |---|---|
 | 🎧 **TV audio on your PC** | Roku private listening over Wi-Fi, with a live volume slider (0–200 %) and adjustable buffer delay |
-| ⏯️ **Remote control** | Play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
+| ⏯️ **Remote control** | Roku-style arrows and OK (hold to repeat), Back, play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
+| ⌨️ **Type on TV** | Type into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus. Like the phone app, it pops up by itself when a keyboard opens on the TV |
 | ▶️ **Embedded YouTube** | Your own Chrome profile (login, extensions, dark mode) inside the app window |
 | 📺 **Auto-cast sync** | Play, pause, scrub, autoplay-next and Shorts mirror to the TV; going back to Home sends Playlet back to its home screen |
 | 🎯 **Latency compensation** | Learns how long Playlet takes to rebuffer and aims seeks ahead, then keeps the PC player locked to the TV's timeline |
@@ -104,7 +105,9 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 1. Enter your Roku's IP (it's saved for next time) and click **Connect**. The TV's speakers mute and the audio plays on your PC.
 2. Adjust **Volume** live. Everything above 100 % is a boost.
 3. **Delay ms** sets the Roku-side buffer. Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles.
-4. The transport buttons control whatever is playing on the Roku.
+4. The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button. The **Remote** column beside them has the remote's arrows and **OK** as square buttons. Holding an arrow repeats it.
+5. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
+6. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, selects the Type box (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the app goes back to the tab you were on. You can also start typing anywhere on the Listen tab without clicking the box first.
 
 ### YouTube tab
 
@@ -175,7 +178,7 @@ roku-listen/
 | Status says **Reload Playlet Cast in chrome://extensions** | Check that the extension is loaded and **Developer mode** is on, then click its reload icon. |
 | **Port 8765 is busy** | Another copy of Roku Listen is running. Close it. Opening the app again normally just brings the existing window forward. |
 | **Can't reach Playlet on the Roku** | Open Playlet on the TV and check the Roku IP. |
-| Remote buttons do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
+| Remote buttons or **Type on TV** do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
 | Connected but no sound | Allow Roku Listen through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
 | Crackling audio | Raise **Delay ms** (try 500–700). |
 
