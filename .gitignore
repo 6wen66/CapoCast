@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# Roku Listen - keep build output, secrets, logs and machine junk out of git.
+# ---------------------------------------------------------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- PyInstaller / build output (published as GitHub Release assets instead) ---
+build/
+dist/
+*.spec
+*.exe
+
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crx
+
+# --- Logs, dumps, temp files ---
+*.log
+*.tmp
+*.bak
+*.dmp
+~$*
+
+# --- Packaged archives (built by build.ps1) ---
+*.zip
+
+# --- IDEs & editors ---
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+
+# --- OS metadata ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+._*

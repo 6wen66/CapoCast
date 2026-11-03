@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+<body>
+  <header>
+    <img id="thumb" alt="">
+    <div class="meta">
+      <div id="title">Nothing playing</div>
+      <div id="sub">Connecting…</div>
+    </div>
+  </header>
+
+  <div class="seek">
+    <span id="pos">0:00</span>
+    <input id="bar" type="range" min="0" max="0" value="0" step="1" disabled>
+    <span id="dur">0:00</span>
+  </div>
+
+  <div class="controls">
+    <button id="back" title="Back 10s" disabled>⏪ 10</button>
+    <button id="toggle" title="Play / Pause" disabled>⏯</button>
+    <button id="fwd" title="Forward 10s" disabled>10 ⏩</button>
+  </div>
+
+  <button id="cast" class="primary">Cast this tab's video</button>
+
+  <div id="banner" hidden></div>
+  <script src="popup.js"></script>
+</body>

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Playlet Cast",
+  "version": "1.2.0",
+  "description": "Send the current YouTube video straight to Playlet on your Roku. No cast discovery, no session timeouts. Also feeds the Roku Listen app's YouTube tab.",
+  "content_scripts": [
+    { "matches": ["*://www.youtube.com/*"], "js": ["feed.js"], "run_at": "document_idle" }
+  ],
+  "permissions": ["activeTab", "scripting", "storage", "contextMenus"],
+  "host_permissions": ["http://*/*", "https://www.youtube.com/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Playlet remote", "default_popup": "popup.html" },
+  "options_page": "options.html",
+  "commands": {
+    "cast-now": {
+      "suggested_key": { "default": "Alt+Shift+C" },
+      "description": "Cast current video to Playlet"
+    }
+  }
+}
