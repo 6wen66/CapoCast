@@ -56,8 +56,8 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 | | |
 |---|---|
 | 🎧 **TV audio on your PC** | Roku private listening over Wi-Fi, with a live volume slider (0–200 %) and adjustable buffer delay |
-| ⏯️ **Remote control** | Play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
-| ⌨️ **Type on TV** | Type into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus |
+| ⏯️ **Remote control** | Back, play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
+| ⌨️ **Type on TV** | Type into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus. Like the phone app, it pops up by itself when a keyboard opens on the TV |
 | ▶️ **Embedded YouTube** | Your own Chrome profile (login, extensions, dark mode) inside the app window |
 | 📺 **Auto-cast sync** | Play, pause, scrub, autoplay-next and Shorts mirror to the TV; going back to Home sends Playlet back to its home screen |
 | 🎯 **Latency compensation** | Learns how long Playlet takes to rebuffer and aims seeks ahead, then keeps the PC player locked to the TV's timeline |
@@ -105,8 +105,9 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 1. Enter your Roku's IP (it's saved for next time) and click **Connect**. The TV's speakers mute and the audio plays on your PC.
 2. Adjust **Volume** live. Everything above 100 % is a boost.
 3. **Delay ms** sets the Roku-side buffer. Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles.
-4. The transport buttons control whatever is playing on the Roku.
+4. The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button.
 5. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
+6. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, selects the Type box (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the app goes back to the tab you were on. You can also start typing anywhere on the Listen tab without clicking the box first.
 
 ### YouTube tab
 

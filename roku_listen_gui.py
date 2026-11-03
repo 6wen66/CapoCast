@@ -4,6 +4,7 @@ Reuses the protocol helpers from roku_listen.py. Instead of ffplay, audio is dec
 scaled by the volume slider in Python (audioop) and played with sounddevice, so volume works live.
 """
 import asyncio
+import base64
 import ctypes
 import audioop
 import json
@@ -144,6 +145,73 @@ class KeySender:
                     self.error = "Can't reach the Roku"
                 with self.q.mutex:          # don't sit through a 3 s timeout for every queued key
                     self.q.queue.clear()
+
+
+class KeyboardWatch:
+    """Hears when a text field opens on the TV, the same signal the official phone app uses to pop up its keyboard.
+
+    Keeps its own ecp-2 session open (the listening one only exists while audio is connected), subscribes to the
+    textedit events and calls on_change({"text", "masked"}) while a field is open, or on_change(None).
+    """
+
+    EVENTS = "+textedit-opened,+textedit-changed,+textedit-closed"
+
+    def __init__(self, host_fn, on_change):
+        self.host_fn, self.on_change = host_fn, on_change
+        self.stop_evt = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def stop(self):
+        self.stop_evt.set()
+
+    def _run(self):
+        delay = 2
+        while not self.stop_evt.is_set():
+            try:
+                asyncio.run(self._session(self.host_fn()))
+                delay = 2                       # left on purpose (IP changed): reconnect promptly
+            except Exception as e:
+                log(f"keyboard watch: {e!r}")
+                delay = min(30, delay * 2)      # TV asleep / unreachable: back off
+            self.on_change(None)
+            self.stop_evt.wait(delay)
+
+    def _emit(self, d, prefix):
+        tid = d.get(prefix + "textedit-id")
+        if tid in (None, "none"):
+            self.on_change(None)
+        else:
+            self.on_change({"text": d.get(prefix + "text", ""), "masked": d.get(prefix + "masked") == "true"})
+
+    async def _session(self, host):
+        async with websockets.connect(f"ws://{host}:{ECP_PORT}/ecp-session", subprotocols=["ecp-2"],
+                                      additional_headers={"Sec-WebSocket-Origin": "Android"},
+                                      open_timeout=5) as ws:
+            while not self.stop_evt.is_set() and self.host_fn() == host:
+                try:
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), 2))
+                except asyncio.TimeoutError:
+                    continue
+                note, resp = msg.get("notify"), msg.get("response")
+                if note == "authenticate":
+                    await ws.send(json.dumps({"request": "authenticate", "request-id": "0",
+                                              "param-response": auth_response(msg["param-challenge"])}))
+                elif resp == "authenticate":
+                    if msg.get("status") != "200":
+                        raise RuntimeError(f"auth refused: {msg}")
+                    await ws.send(json.dumps({"request": "request-events", "request-id": "1",
+                                              "param-events": self.EVENTS}))
+                    # a field may already be open when we connect
+                    await ws.send(json.dumps({"request": "query-textedit-state", "request-id": "2"}))
+                elif resp == "request-events" and msg.get("status") not in ("200", "202"):
+                    raise RuntimeError(f"TV won't send keyboard events: {msg}")
+                elif resp == "query-textedit-state" and msg.get("status") == "200":
+                    state = json.loads(base64.b64decode(msg["content-data"])).get("textedit-state", {})
+                    self._emit(state, "")
+                elif note in ("textedit-opened", "textedit-changed"):
+                    self._emit(msg, "param-")
+                elif note == "textedit-closed":
+                    self.on_change(None)
 
 
 class CastSync:
@@ -510,7 +578,7 @@ class RoundButton(tk.Canvas):
 
 
 class IconButton(tk.Canvas):
-    """Small rounded transport button with a drawn icon: back10, rev, play, pause, fwd, fwd10."""
+    """Small rounded transport button with a drawn icon: back, back10, rev, play, pause, fwd, fwd10."""
 
     def __init__(self, parent, kind, command, width=58, height=44):
         super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
@@ -537,7 +605,11 @@ class IconButton(tk.Canvas):
         self.delete("all")
         rounded(self, 1, 1, self.w - 1, self.h - 1, 12, fill="#26262b" if self.hot else "#151518", outline=EDGE)
         cx, cy, k = self.w / 2, self.h / 2, self.kind
-        if k in ("back10", "fwd10"):
+        if k == "back":   # the Roku remote's U-turn arrow: points left on top, hooks down on the right
+            self.create_line(cx - 9, cy - 4, cx + 3, cy - 4, cx + 9, cy - 4, cx + 9, cy + 6, cx + 3, cy + 6,
+                             cx - 3, cy + 6, smooth=True, width=2.5, fill=FG, capstyle="round",
+                             arrow="first", arrowshape=(7, 8, 4))
+        elif k in ("back10", "fwd10"):
             self.create_text(cx, cy, text=("−10" if k == "back10" else "+10"), fill=FG, font=(FONT, 11, "bold"))
         elif k in ("rev", "fwd"):
             right = k == "fwd"
@@ -668,6 +740,7 @@ class TypeBox(tk.Frame):
                          highlightbackground=EDGE, highlightcolor=ACCENT, cursor="xterm")
         self.pack_propagate(False)
         self.sender, self.typed, self.last = sender, "", ""
+        self.tv = None   # {"text", "masked"} while a text field is open on the TV (from KeyboardWatch)
         self.line = tk.Label(self, bg=CARD, font=(FONT, 11), anchor="w")
         self.hint = tk.Label(self, bg=CARD, font=(FONT, 8), anchor="w")
         self.line.pack(fill="x", padx=12, pady=(8, 0))
@@ -681,6 +754,19 @@ class TypeBox(tk.Frame):
 
     def owns(self, widget):
         return widget in (self, self.line, self.hint)
+
+    @staticmethod
+    def wants(e):
+        """True for keys the box would send (so a stray press elsewhere can be handed to it)."""
+        if e.state & CTRL and not e.state & ALT:
+            return e.keysym.lower() == "v"
+        return e.keysym in ECP_KEYS or bool(e.char and e.char.isprintable())
+
+    def set_tv(self, state):
+        if state is None:
+            self.typed, self.last = "", ""
+        self.tv = state
+        self.render()
 
     def _key(self, e):
         if e.keysym in ("Tab", "ISO_Left_Tab"):
@@ -715,19 +801,31 @@ class TypeBox(tk.Frame):
         self.render()
 
     def render(self):
-        focused = self.focus_get() is self
-        if self.typed or focused:
-            shown = self.typed if len(self.typed) <= 30 else "…" + self.typed[-29:]
+        try:
+            focused = self.focus_get() is self
+        except KeyError:   # focus is inside the embedded Chrome, which Tk doesn't know
+            focused = False
+        if self.tv is not None:   # the TV's own text is the truth; passwords stay hidden
+            text = self.tv["text"]
+            text = "•" * len(text) if self.tv["masked"] else text
+        else:
+            text = self.typed
+        if text or focused:
+            shown = text if len(text) <= 30 else "…" + text[-29:]
             self.line.config(text=shown + ("▏" if focused else ""), fg=FG)
         else:
             self.line.config(text="Click here to type on the TV", fg=MUTED)
+        last = f"  ·  sent {self.last}" if self.last else ""
         if self.sender.error:
             self.hint.config(text=self.sender.error, fg=RED)
+        elif self.tv is not None:
+            self.hint.config(text=("TV keyboard open · Enter = OK · Esc = Back" + last) if focused
+                             else "TV keyboard open · click here to type", fg=GREEN)
         elif focused:
-            last = f"  ·  sent {self.last}" if self.last else ""
             self.hint.config(text=f"Arrows move · Enter = OK · Esc = Back{last}", fg=MUTED)
         else:
             self.hint.config(text="Search and sign-in boxes, Ctrl+V pastes", fg=MUTED)
+        self.config(highlightbackground=GREEN if self.tv is not None and not focused else EDGE)
 
 
 class NavButton(tk.Canvas):
@@ -919,16 +1017,17 @@ class App(tk.Tk):
         # transport: acts on whatever the Roku is playing, independent of the audio connection
         trow = tk.Frame(col, bg=BG)
         trow.pack(fill="x")
-        self.play_btn = IconButton(trow, "play", self._toggle_play)
+        self.play_btn = IconButton(trow, "play", self._toggle_play, width=48)
         for i, (kind, action) in enumerate([
+            ("back", lambda: self.keys.key("Back")),      # through the key queue, so it lands after any typing
             ("back10", lambda: self._remote(Remote.seek, -10)),
             ("rev", lambda: self._remote(Remote.key, "Rev")),
             (None, None),
             ("fwd", lambda: self._remote(Remote.key, "Fwd")),
             ("fwd10", lambda: self._remote(Remote.seek, 10)),
         ]):
-            btn = self.play_btn if kind is None else IconButton(trow, kind, action)
-            btn.pack(side="left", padx=(0 if i == 0 else 9, 0))
+            btn = self.play_btn if kind is None else IconButton(trow, kind, action, width=48)
+            btn.pack(side="left", padx=(0 if i == 0 else 8, 0))   # 6 x 48 + 5 x 8 = 328, the column width
         self.now = tk.Label(col, text="Nothing playing", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
         self.now.pack(fill="x", pady=(8, 14))
         self.play_state, self._polling = "none", False
@@ -939,6 +1038,10 @@ class App(tk.Tk):
         self.typebox.pack(pady=(4, 16))
         # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
         self.bind_all("<Button-1>", self._click_away, add="+")
+        # typing with nothing else selected goes to the TV too (bound on the window, so Entries are left alone)
+        self.bind("<KeyPress>", self._stray_key)
+        self._kb_from = None   # tab to go back to when the TV's keyboard closes
+        self.kb_watch = KeyboardWatch(lambda: self._host, self._on_tv_keyboard)
 
         vrow = tk.Frame(col, bg=BG)
         vrow.pack(fill="x")
@@ -1071,11 +1174,63 @@ class App(tk.Tk):
         self.play_btn.set_kind("pause" if self.play_state == "play" else "play")
         self.typebox.render()   # picks up typing errors reported by the sender thread
 
+    def _focused(self):
+        try:
+            return self.focus_get()
+        except KeyError:   # focus is inside the embedded Chrome
+            return None
+
     def _click_away(self, e):
         w = e.widget
         if isinstance(w, tk.Misc) and not self.typebox.owns(w) and not isinstance(w, tk.Entry) \
-                and self.focus_get() is self.typebox:
+                and self._focused() is self.typebox:
             self.focus_set()
+
+    def _stray_key(self, e):
+        """A key pressed on the Listen tab with nothing selected: hand it to the Type box."""
+        if e.widget is self and self.page == "Listen" and self.typebox.wants(e):
+            self.typebox.focus_set()
+            result = self.typebox._key(e)
+            self.after(1, self.typebox.render)   # draw the caret once focus has actually moved
+            return result
+        return None
+
+    # ---- TV keyboard (pops up like the phone app's) ------------------------
+    def _on_tv_keyboard(self, state):
+        try:
+            self.after(0, self._tv_keyboard, state)   # from the watcher thread: hop to the Tk thread
+        except RuntimeError:   # window already closed
+            pass
+
+    def _tv_keyboard(self, state):
+        was_open = self.typebox.tv is not None
+        self.typebox.set_tv(state)
+        if state is not None and not was_open:
+            log("TV keyboard opened")
+            self._kb_from = self.page if self.page != "Listen" else None
+            self._show("Listen")
+            self.typebox.focus_set()
+            self.after(1, self.typebox.render)
+            self._pop_up()
+        elif state is None and was_open:
+            log("TV keyboard closed")
+            if self._focused() is self.typebox:
+                self.focus_set()
+            if self._kb_from:
+                self._show(self._kb_from)
+            self._kb_from = None
+
+    def _pop_up(self):
+        """Bring the window forward. If another app (say, a game) has the foreground, Windows refuses and
+        flashes the taskbar button instead, so this never yanks you out of what you're doing."""
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            if self.state() == "iconic":
+                ctypes.windll.user32.FlashWindow(hwnd, True)
+            else:
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception as e:
+            log(f"pop up failed: {e!r}")
 
     def _field(self, parent, label, var, width, pad=(0, 0)):
         box = tk.Frame(parent, bg=BG)
@@ -1184,6 +1339,7 @@ class App(tk.Tk):
 
     def close(self):
         self._save()
+        self.kb_watch.stop()
         self.chrome.release()
         self.bridge.stop()
         if self.listener:
