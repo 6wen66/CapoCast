@@ -24,7 +24,7 @@ Open an issue with the **Feature request** template. Describe the problem you wa
 
 ## Development setup
 
-**Prerequisites:** Windows 10/11, Python 3.11+, [FFmpeg](https://ffmpeg.org/) on your `PATH`, Google Chrome, and a Roku with [Playlet](https://github.com/iBicha/playlet) installed.
+**Prerequisites:** Windows 10/11, Python 3.11+, [FFmpeg](https://ffmpeg.org/) on your `PATH`, Google Chrome, and a Roku with [Playlet](https://github.com/iBicha/playlet) installed. For the Web tab you also need [Brave](https://brave.com/download/) (opened once, so it has downloaded its ad filters) and the RokuCast channel sideloaded on the Roku.
 
 ```powershell
 git clone https://github.com/6wen66/roku-listen.git
@@ -51,6 +51,15 @@ To build the standalone `.exe`:
 | `roku_listen.py` | Protocol helpers + a minimal command-line client (plays through `ffplay`) |
 | `yt_embed.py` | Launches Chrome in app mode and embeds its window in the YouTube tab |
 | `yt_bridge.py` | Local HTTP bridge (`127.0.0.1:8765`) between the app and the extension |
+| `web_tab.py` | The Web tab: toolbar, headless Brave lifecycle, and the Cast flow |
+| `web_view.py` | Draws the headless browser's page on a canvas and forwards mouse / keyboard (key translation is pure and unit tested) |
+| `web_sync.py` | Keeps the TV following the page's video after a Web cast (pause, play, scrub). Pure logic over injected TV / relay / guard objects, so it's unit tested with fakes |
+| `web_guard.py` | Drives Brave over DevTools: pop-up / redirect / click-trap guards, stream capture, screencast, input, and the page's play / pause / seek events |
+| `stream_finder.py` | Chooses the real video among decoys. Pure logic, no I/O |
+| `media_relay.py` | LAN server that relays a stream to the Roku with the site's headers and rewrites HLS / DASH manifests |
+| `brave_profile.py` | The Web tab's private Brave profile and its launch flags; copies Brave's ad filters into it |
+| `drm.py` | DRM refusal (by site and by HLS key). Keep it: the project doesn't cast DRM content |
+| `tests/` | Unit tests, the hostile test site (`decoy_site.py`) and three end-to-end checks (see below) |
 | `extension/` | Chrome extension: Playlet cast button and the auto-cast content script (`feed.js`) |
 | `assets/` | Bundled fonts and icons |
 
@@ -63,12 +72,29 @@ To build the standalone `.exe`:
 
 ## Testing your change
 
-There is no automated test suite yet (contributions welcome!). Before opening a PR, please check by hand:
+Run the unit tests (no Roku needed):
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+If you touched the Web tab, also run the end-to-end checks. They need Brave and FFmpeg, run Brave headless (nothing appears on screen and nothing takes focus, so they're safe to run while you game) and print PASS/FAIL per check:
+
+```powershell
+python tests\guard_smoke.py       # ~45 s: protection, frames, typing/scroll/alerts, decoy filter, against a hostile site
+python tests\web_tab_smoke.py     # ~50 s: the real Web tab and Cast button against a fake Roku on localhost:8060
+python tests\formats_smoke.py     # ~2 min: HLS, HLS with a Referer check, disguised HLS, DASH, DASH with absolute URLs
+```
+
+`web_tab_smoke.py` needs port 8060 free (close Roku Listen first) and `formats_smoke.py` loads hls.js and dash.js from a CDN. To try the hostile site by hand, run `python tests\decoy_site.py` and open the printed URL in the Web tab.
+
+The UI and the Roku-facing code have no automated tests, so before opening a PR please also check by hand:
 
 - [ ] **Listen tab:** Connect plays TV audio for 30 s or more, volume works, and Disconnect restores the TV speakers.
 - [ ] **Transport:** play/pause, ±10 s and rewind/fast-forward act on the Roku.
 - [ ] **YouTube tab:** Chrome embeds, resizes with the window, and closes with the app.
 - [ ] **Auto-cast:** picking a video plays it on the TV; pause, scrub, and going back to Home all mirror correctly.
+- [ ] **Web tab:** Brave embeds and resizes with the window; on a real video page Cast plays on the TV (check the Windows Firewall prompt on a first run); pause and ±10 s work from the Listen tab; going Web → YouTube → Web keeps both working.
 - [ ] No errors in `%APPDATA%\RokuListen.log`.
 
 ## Submitting a pull request

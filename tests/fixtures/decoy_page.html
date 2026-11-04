@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Decoy: totally legit anime (test page)</title>
+<style>
+  body { margin: 0; background: #14141a; color: #ddd; font: 15px sans-serif; text-align: center }
+  iframe { width: 640px; height: 360px; border: 0; margin: 24px auto 8px; display: block; background: #000 }
+  a { color: #7aa7ff; margin: 0 12px }
+  input, button { font-size: 15px; padding: 6px 10px }
+  /* Click trap: a see-through layer over the whole page that opens an ad the first time you click */
+  #trap { position: fixed; inset: 0; z-index: 99999; background: transparent }
+</style>
+<h2>Decoy page</h2>
+<p>Everything on this page is a test for the Web tab's protection.</p>
+<iframe id="player" src="http://localhost:{OTHER}/player.html"></iframe>
+<p>
+  <a id="fake" href="http://localhost:{OTHER}/pop" target="_blank">Download HD (fake button, cross-site tab)</a>
+  <a id="real" href="/page2" target="_blank">Next episode (normal link, same-site tab)</a>
+</p>
+<p>
+  <input id="q" placeholder="type here (search box)">
+  <button id="alertbtn" onclick="alert('You have won!'); document.title = 'alerted'">Spam alert()</button>
+</p>
+<div style="height: 1800px"></div>
+<p id="bottom">bottom of the page</p>
+<div id="trap"></div>
+<script>
+  document.getElementById('trap').addEventListener('click', () => {
+    window.open('http://localhost:{OTHER}/pop', '_blank');
+  });
+  if (location.search.includes('bounce')) {
+    // Hijack: send the visitor to an ad site a few seconds after load, with no click involved
+    setTimeout(() => { location.href = 'http://localhost:{OTHER}/ad'; }, 2500);
+  }
+</script>

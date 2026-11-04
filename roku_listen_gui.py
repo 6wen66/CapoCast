@@ -29,7 +29,9 @@ import sounddevice as sd
 from PIL import Image, ImageTk
 import websockets
 
+import web_tab
 import yt_embed
+from types import SimpleNamespace
 from yt_bridge import Bridge
 
 from roku_listen import (
@@ -42,6 +44,7 @@ CHUNK = 960 * 4  # 20 ms of 48 kHz stereo s16le
 RR_EVERY = 1.0   # seconds between RTCP receiver reports; the Roku drops the stream if they're too sparse
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LOG = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RokuListen.log")
+PLAYLET_ID = "693751"   # the Roku channel id of Playlet, which plays the YouTube tab's videos
 
 
 def log(msg):
@@ -102,8 +105,56 @@ class Remote:
             body["playlistId"] = playlist_id
         if timestamp > 3:
             body["timestamp"] = int(timestamp)
-        cls._open(f"http://{host}:8888/api/queue/play", data=json.dumps(body).encode(),
-                  headers={"Content-Type": "application/json", "X-Playlet": "1"})
+        send = lambda: cls._open(f"http://{host}:8888/api/queue/play", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "X-Playlet": "1"})
+        try:
+            send()
+        except urllib.error.HTTPError:
+            raise
+        except OSError:
+            # Playlet's server only runs while Playlet is on screen. After a Web-tab cast (or any other app) the
+            # TV is somewhere else, so open Playlet and try once more.
+            cls._ensure_playlet(host)
+            send()
+
+    @classmethod
+    def _ensure_playlet(cls, host):
+        cls._open(f"http://{host}:{ECP_PORT}/launch/{PLAYLET_ID}", data=b"")
+        for _ in range(24):
+            time.sleep(0.5)
+            try:
+                cls._open(f"http://{host}:8888/api/state", timeout=2)
+                return
+            except OSError:
+                pass
+
+    @classmethod
+    def active_app(cls, host):
+        """ECP id of the app on screen ('dev' is the sideloaded RokuCast channel), or ''."""
+        try:
+            app = ET.fromstring(cls._open(f"http://{host}:{ECP_PORT}/query/active-app")).find("app")
+            return app.get("id", "") if app is not None else ""
+        except Exception:
+            return ""
+
+    @classmethod
+    def cast_url(cls, host, url):
+        """Play an http(s) URL in the RokuCast channel: launch it, or if it's already running hand it the URL."""
+        enc = urllib.parse.quote(url, safe="")
+        running = cls.active_app(host) == "dev"
+        path = f"/input?url={enc}" if running else f"/launch/dev?url={enc}"
+        try:
+            cls._open(f"http://{host}:{ECP_PORT}{path}", data=b"", timeout=6)
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and not running:
+                raise RuntimeError("The RokuCast channel isn't installed on this Roku (the Web tab plays video "
+                                   "through it).")
+            if e.code == 403:
+                raise RuntimeError("The Roku refused the command. On the Roku: Settings > System > Advanced system "
+                                   "settings > Control by mobile apps > Network access > Permissive.")
+            raise RuntimeError(f"The Roku answered HTTP {e.code}.")
+        except OSError as e:
+            raise RuntimeError(f"Couldn't reach the Roku at {host}: {e}")
 
     @classmethod
     def close_player(cls, host):
@@ -154,10 +205,10 @@ class KeyboardWatch:
     textedit events and calls on_change({"text", "masked"}) while a field is open, or on_change(None).
     """
 
-    EVENTS = "+textedit-opened,+textedit-changed,+textedit-closed"
+    EVENTS = "+textedit-opened,+textedit-changed,+textedit-closed,+volume-changed"
 
-    def __init__(self, host_fn, on_change):
-        self.host_fn, self.on_change = host_fn, on_change
+    def __init__(self, host_fn, on_change, on_volume=None):
+        self.host_fn, self.on_change, self.on_volume = host_fn, on_change, on_volume
         self.stop_evt = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -212,6 +263,12 @@ class KeyboardWatch:
                     self._emit(msg, "param-")
                 elif note == "textedit-closed":
                     self.on_change(None)
+                elif note == "volume-changed" and self.on_volume:
+                    try:
+                        self.on_volume({"volume": int(msg.get("param-volume", "")), "mute": msg.get("param-mute") == "true",
+                                        "dest": msg.get("param-audio-destination", "")})
+                    except ValueError:
+                        pass
 
 
 class CastSync:
@@ -359,6 +416,65 @@ class CastSync:
                     Remote.key(host, "Play")
                 return
             time.sleep(0.4)   # buffering / starting up
+
+
+class TvVolume:
+    """The TV's own volume, for when the sound is playing on the Roku and not routed to this PC.
+
+    The Roku can't be asked what its volume is, but it announces every change (volume, mute and where the sound is
+    going), so the level is tracked from those announcements, wherever the change came from: this app or the remote.
+    It can't be set directly either, only nudged with VolumeUp / VolumeDown, so set_target() presses those until the
+    announced level matches. The first press also tells us where we started."""
+
+    def __init__(self, host_fn, on_change):
+        self.host_fn, self.on_change = host_fn, on_change
+        self.level, self.muted, self.dest = None, False, ""
+        self.target = None
+        self._moved, self._wake = threading.Event(), threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def heard(self, d):
+        self.level, self.muted, self.dest = d["volume"], d["mute"], d["dest"]
+        self._moved.set()
+        self.on_change()
+
+    def set_target(self, v):
+        self.target = max(0, min(100, int(v)))
+        self._wake.set()
+
+    def toggle_mute(self):
+        def press():
+            try:
+                Remote.key(self.host_fn(), "VolumeMute")
+            except Exception as e:
+                log(f"tv mute failed: {e!r}")
+        threading.Thread(target=press, daemon=True).start()
+
+    def _run(self):
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            stuck = 0
+            while self.target is not None:
+                target, level = self.target, self.level
+                if level is not None and level == target:
+                    if self.target == target:
+                        self.target = None
+                    break
+                self._moved.clear()
+                try:
+                    Remote.key(self.host_fn(), "VolumeUp" if (level is None or target > level) else "VolumeDown")
+                except Exception as e:
+                    log(f"tv volume press failed: {e!r}")
+                    self.target = None
+                    break
+                if self._moved.wait(0.8):
+                    stuck = 0
+                else:                                  # no announcement: at the limit, or the TV isn't listening
+                    stuck += 1
+                    if stuck >= 2:
+                        self.target = None
+                        break
 
 
 class Listener:
@@ -676,8 +792,17 @@ class Slider(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
         self.lo, self.hi, self.value, self.command, self.w, self.h = lo, hi, value, command, width, height
         self.pad = 10
+        self.mark = 100          # where to draw the 100% tick (None for none)
+        self.dragging = False    # true while the mouse is held on it, so live updates don't fight your hand
         self.bind("<Button-1>", self._drag)
         self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "dragging", False))
+        self.draw()
+
+    def set_range(self, lo, hi, value, mark=None):
+        """Change what the slider measures (PC volume 0-200% vs the TV's 0-100) without calling `command`."""
+        self.lo, self.hi, self.mark = lo, hi, mark
+        self.value = max(lo, min(hi, value))
         self.draw()
 
     def get(self):
@@ -688,6 +813,7 @@ class Slider(tk.Canvas):
         self.draw()
 
     def _drag(self, e):
+        self.dragging = True
         span = self.w - 2 * self.pad
         frac = (e.x - self.pad) / span
         self.set(round(self.lo + frac * (self.hi - self.lo)))
@@ -700,8 +826,9 @@ class Slider(tk.Canvas):
         y = self.h / 2
         self.create_line(self.pad, y, self.w - self.pad, y, fill="#2a2a2e", width=4, capstyle="round")
         # mark 100% so the boost range is obvious
-        x100 = self.pad + span * (100 - self.lo) / (self.hi - self.lo)
-        self.create_line(x100, y - 7, x100, y + 7, fill="#3a3a40", width=1)
+        if self.mark is not None:
+            x100 = self.pad + span * (self.mark - self.lo) / (self.hi - self.lo)
+            self.create_line(x100, y - 7, x100, y + 7, fill="#3a3a40", width=1)
         self.create_line(self.pad, y, x, y, fill=ACCENT, width=4, capstyle="round")
         self.create_oval(x - 8, y - 8, x + 8, y + 8, fill="#ffffff", outline=BG, width=2)
 
@@ -946,11 +1073,15 @@ class App(tk.Tk):
         self._build_topbar()
         body = tk.Frame(self, bg=BG)
         body.pack(fill="both", expand=True)
-        self.pages = {"Listen": tk.Frame(body, bg=BG), "YouTube": tk.Frame(body, bg=BG)}
+        self.pages = {"Listen": tk.Frame(body, bg=BG), "YouTube": tk.Frame(body, bg=BG), "Web": tk.Frame(body, bg=BG)}
         self._build_listen(self.pages["Listen"])
         self._build_youtube(self.pages["YouTube"])
+        ui = SimpleNamespace(BG=BG, CARD=CARD, EDGE=EDGE, FG=FG, MUTED=MUTED, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
+                             GREEN=GREEN, AMBER=AMBER, RED=RED, GREY=GREY, FONT=FONT, FONT_MED=FONT_MED,
+                             RoundButton=RoundButton, NavButton=NavButton, Remote=Remote, log=log)
+        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"))
         self.page = None
-        self._show("YouTube" if "--youtube" in sys.argv else "Listen")
+        self._show("YouTube" if "--youtube" in sys.argv else "Web" if "--web" in sys.argv else "Listen")
 
         self.protocol("WM_DELETE_WINDOW", self.close)
         if "--autoconnect" in sys.argv:
@@ -974,7 +1105,7 @@ class App(tk.Tk):
         brand = (FONT, 13, "bold")
         bar.create_text(60, text_y(brand, cy), text="Roku Listen", anchor="w", fill=FG, font=brand)
 
-        self.tabs = TabSwitch(bar, ["Listen", "YouTube"], self._show)
+        self.tabs = TabSwitch(bar, ["Listen", "YouTube", "Web"], self._show, seg_w=88)
         bar.create_window(194, cy, window=self.tabs, anchor="w")
 
         # browser nav sits next to the tabs, like a browser's toolbar
@@ -1104,16 +1235,23 @@ class App(tk.Tk):
         # typing with nothing else selected goes to the TV too (bound on the window, so Entries are left alone)
         self.bind("<KeyPress>", self._stray_key)
         self._kb_from = None   # tab to go back to when the TV's keyboard closes
-        self.kb_watch = KeyboardWatch(lambda: self._host, self._on_tv_keyboard)
+        self.tvvol = TvVolume(lambda: self._host, lambda: self._after_safe(self._tv_volume_changed))
+        self.kb_watch = KeyboardWatch(lambda: self._host, self._on_tv_keyboard, self.tvvol.heard)
 
+        # One volume control for whichever place the sound is going: this PC while audio is routed here (Connect),
+        # the TV's own volume otherwise. It switches by itself when you connect or disconnect.
         vrow = tk.Frame(col, bg=BG)
         vrow.pack(fill="x")
-        tk.Label(vrow, text="Volume", bg=BG, fg=MUTED, font=(FONT, 10)).pack(side="left")
+        self.vol_title = tk.Label(vrow, text="Volume", bg=BG, fg=MUTED, font=(FONT, 10))
+        self.vol_title.pack(side="left")
         self.vol_label = tk.Label(vrow, bg=BG, fg=FG, font=(FONT, 10, "bold"))
         self.vol_label.pack(side="right")
-        self.scale = Slider(col, 0, 200, self._load().get("volume", 100), self._on_volume)
+        self.mute_lbl = tk.Label(vrow, text="Mute", bg=BG, fg=MUTED, font=(FONT, 9), cursor="hand2")
+        self.mute_lbl.bind("<Button-1>", lambda e: self.tvvol.toggle_mute())
+        self.pc_volume = int(self._load().get("volume", 100))
+        self.scale = Slider(col, 0, 200, self.pc_volume, self._on_volume)
         self.scale.pack(pady=(4, 18))
-        self._on_volume(self.scale.get())
+        self._refresh_volume()
 
         orow = tk.Frame(col, bg=BG)
         orow.pack(fill="x")
@@ -1148,6 +1286,11 @@ class App(tk.Tk):
                 self._yt_reopen()
         else:
             self.chrome.show(False)
+        # each tab hides the other's browser; the Web tab starts its own the first time it's opened
+        if name == "Web":
+            self.web.on_show()
+        else:
+            self.web.on_hide()
 
     # ---- YouTube (embedded Chrome) ----------------------------------------
     def _yt_message(self, text, clickable=False):
@@ -1187,6 +1330,13 @@ class App(tk.Tk):
         self.autocast = on
         self.bridge.settings["autocast"] = on
         self._save()
+
+    def autocast_off(self):
+        """A Web-tab cast owns the TV now; stop the YouTube tab's auto-cast from taking it back."""
+        if self.autocast:
+            self.auto_toggle.on = False
+            self.auto_toggle.draw()
+            self._set_autocast(False)
 
     # ---- transport -------------------------------------------------------
     def _remote(self, fn, *args):
@@ -1330,7 +1480,8 @@ class App(tk.Tk):
     def _save(self):
         try:
             with open(CONFIG, "w", encoding="utf-8") as f:
-                json.dump({"host": self.host.get().strip(), "delay": self._delay(), "volume": int(self.scale.get()), "autocast": self.autocast}, f)
+                json.dump({"host": self.host.get().strip(), "delay": self._delay(), "volume": self.pc_volume,
+                           "autocast": self.autocast, "web_home": getattr(getattr(self, "web", None), "home", None)}, f)
         except OSError:
             pass
 
@@ -1340,11 +1491,44 @@ class App(tk.Tk):
         except ValueError:
             return 500
 
+    def _after_safe(self, fn):
+        try:
+            self.after(0, fn)          # from a worker thread: hop to the Tk thread
+        except RuntimeError:           # window already closed
+            pass
+
     def _on_volume(self, value):
-        pct = int(value)
-        self.vol_label.config(text=f"{pct}%")
+        """The slider moved (not called when the code moves it): drive whichever volume it currently stands for."""
         if self.listener:
-            self.listener.volume = pct / 100
+            self.pc_volume = int(value)
+            self.listener.volume = self.pc_volume / 100
+        else:
+            self.tvvol.set_target(int(value))
+        self._refresh_volume()
+
+    def _tv_volume_changed(self):
+        """The TV announced a volume change (from this app or from the remote): follow it."""
+        self._refresh_volume()
+
+    def _refresh_volume(self):
+        """Make the control show the right thing for where the sound is going right now."""
+        if self.listener:                                   # routed to this PC: the PC's own gain, 0-200%
+            if self.scale.hi != 200:
+                self.scale.set_range(0, 200, self.pc_volume, mark=100)
+            self.vol_title.config(text="Volume  ·  this PC")
+            self.vol_label.config(text=f"{self.pc_volume}%")
+            self.mute_lbl.pack_forget()
+            return
+        tv = self.tvvol                                     # playing on the Roku: the TV's own volume, 0-100
+        if self.scale.hi != 100:
+            self.scale.set_range(0, 100, tv.level or 0, mark=None)
+        elif tv.level is not None and not self.scale.dragging and tv.target is None:
+            self.scale.set_range(0, 100, tv.level, mark=None)
+        self.vol_title.config(text="Volume  ·  TV")
+        self.vol_label.config(text="—" if tv.level is None else str(tv.level))
+        if not self.mute_lbl.winfo_ismapped():
+            self.mute_lbl.pack(side="right", padx=(0, 10))
+        self.mute_lbl.config(text="Muted" if tv.muted else "Mute", fg=RED if tv.muted else MUTED)
 
     def _set_dot(self, text):
         color = GREEN if text.startswith("Connected") else AMBER if text.startswith("Connecting") \
@@ -1371,7 +1555,7 @@ class App(tk.Tk):
 
     def connect(self):
         listener = Listener(self.host.get().strip() or DEFAULT_HOST, self._delay(), self.set_status)
-        listener.volume = self.scale.get() / 100
+        listener.volume = self.pc_volume / 100
         self.btn.style("Connecting…", ACCENT, ACCENT_HI, enabled=False)
         self.update_idletasks()
         try:
@@ -1388,6 +1572,7 @@ class App(tk.Tk):
         for w in (self.host_entry, self.delay_entry):
             w.config(state="disabled")
         self.btn.style("Disconnect", "#26262b", "#34343a")
+        self._refresh_volume()                              # the sound now goes to this PC: slider = PC volume
 
     def disconnect(self, keep_status=False):
         if self.listener:
@@ -1399,11 +1584,13 @@ class App(tk.Tk):
         for w in (self.host_entry, self.delay_entry):
             w.config(state="normal")
         self.btn.style("Connect", ACCENT, ACCENT_HI)
+        self._refresh_volume()                              # the sound is back on the TV: slider = TV volume
 
     def close(self):
         self._save()
         self.kb_watch.stop()
         self.chrome.release()
+        self.web.close()
         self.bridge.stop()
         if self.listener:
             self.listener.stop()
