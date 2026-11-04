@@ -4,7 +4,7 @@ site, with a fake Roku on localhost standing in for the TV.
     python tests/web_tab_smoke.py
 
 Nothing appears on screen: Brave is headless and the Tk root is never shown. The fake Roku answers ECP on
-127.0.0.1:8060, so that port must be free (close Roku Listen first) and no real Roku is touched. Takes ~50 s.
+127.0.0.1:8060, so that port must be free (close CapoCast first) and no real Roku is touched. Takes ~50 s.
 """
 import json
 import os
@@ -138,7 +138,7 @@ def main():
     try:
         roku_srv = ThreadingHTTPServer(("127.0.0.1", 8060), FakeRoku)
     except OSError as e:
-        sys.exit(f"port 8060 is busy ({e}); close Roku Listen and try again")
+        sys.exit(f"port 8060 is busy ({e}); close CapoCast and try again")
     threading.Thread(target=roku_srv.serve_forever, daemon=True).start()
 
     messagebox.showinfo = lambda title, msg, **k: print(f"   [dialog] {title}: {msg}")   # never block on a dialog

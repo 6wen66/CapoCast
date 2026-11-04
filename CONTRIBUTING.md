@@ -1,4 +1,4 @@
-# Contributing to Roku Listen
+# Contributing to CapoCast
 
 Thanks for taking the time to help! Bug reports, fixes and ideas are all welcome.
 
@@ -40,7 +40,7 @@ Load the extension from the `extension/` folder (`chrome://extensions` → **Dev
 To build the standalone `.exe`:
 
 ```powershell
-.\build.ps1 -Clean      # -> dist\RokuListen.exe and dist\playlet-cast-extension.zip
+.\build.ps1 -Clean      # -> dist\CapoCast.exe and dist\playlet-cast-extension.zip
 ```
 
 ## Project layout
@@ -86,7 +86,7 @@ python tests\web_tab_smoke.py     # ~50 s: the real Web tab and Cast button agai
 python tests\formats_smoke.py     # ~2 min: HLS, HLS with a Referer check, disguised HLS, DASH, DASH with absolute URLs
 ```
 
-`web_tab_smoke.py` needs port 8060 free (close Roku Listen first) and `formats_smoke.py` loads hls.js and dash.js from a CDN. To try the hostile site by hand, run `python tests\decoy_site.py` and open the printed URL in the Web tab.
+`web_tab_smoke.py` needs port 8060 free (close CapoCast first) and `formats_smoke.py` loads hls.js and dash.js from a CDN. To try the hostile site by hand, run `python tests\decoy_site.py` and open the printed URL in the Web tab.
 
 The UI and the Roku-facing code have no automated tests, so before opening a PR please also check by hand:
 

@@ -1,6 +1,6 @@
 """DRM refusal for the Web tab.
 
-Roku Listen won't cast DRM-protected services and contains no code that tries to get around the protection.
+CapoCast won't cast DRM-protected services and contains no code that tries to get around the protection.
 There are two gates: well-known DRM sites are refused by name, and any HLS playlist that declares a
 Widevine / PlayReady / FairPlay key is refused when its playlist is read (media_relay.rewrite_hls).
 """
@@ -14,7 +14,7 @@ DRM_HOSTS = {
     "criterionchannel.com", "shudder.com", "spotify.com", "audible.com",
 }
 
-MESSAGE = ("{host} protects its video with DRM.\n\nRoku Listen can't cast it and won't try to get around "
+MESSAGE = ("{host} protects its video with DRM.\n\nCapoCast can't cast it and won't try to get around "
            "the protection. Use that service's own Roku channel instead.")
 
 # KEYFORMAT values in an HLS key line that mean "this needs a DRM license", not a plain AES key
