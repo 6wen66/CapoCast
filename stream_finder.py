@@ -32,6 +32,10 @@ AD_HOSTS = (
 AD_HINTS = ("/ads/", "/ad/", "adserver", "preroll", "pre-roll", "midroll", "mid-roll", "/vast", "advert", "adtech",
             "/promo/")
 SOFT_JUNK = ("thumb", "sprite", "storyboard", "preview", "poster", "teaser", "trailer", "intro_ad")
+# a number straight after one of these is a whole title's id, not an episode
+TITLE_SEGMENTS = {"watch", "movie", "movies", "film", "films", "title", "titles", "tv", "show", "shows", "series",
+                  "video", "videos", "v", "anime", "play", "stream", "id"}
+TITLE_KEYS = {"id", "v", "vid", "video", "title", "movie"}
 
 
 def host_of(url):
@@ -50,6 +54,36 @@ def site_of(host):
     if len(parts[-1]) == 2 and parts[-2] in ("co", "com", "org", "net", "gov", "ac", "ne", "or"):
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
+
+
+def same_show(a, b):
+    """True if two page addresses look like neighbouring episodes of one show, not two different titles.
+
+    Only numbers may differ ('?s=1&e=5', '/naruto-episode-5'). A bare id after a generic word ('/movie/1507696') or a
+    key like ?id= names a whole title, so a change there doesn't count."""
+    ua, ub = urllib.parse.urlparse(a), urllib.parse.urlparse(b)
+    if not ua.hostname or site_of(ua.hostname) != site_of(ub.hostname):
+        return False
+    pa, pb = ua.path.strip("/").split("/"), ub.path.strip("/").split("/")
+    qa, qb = dict(urllib.parse.parse_qsl(ua.query)), dict(urllib.parse.parse_qsl(ub.query))
+    if len(pa) != len(pb) or qa.keys() != qb.keys():
+        return False
+    moved = False
+    for i, (x, y) in enumerate(zip(pa, pb)):
+        if x == y:
+            continue
+        if re.sub(r"\d+", "#", x) != re.sub(r"\d+", "#", y):
+            return False
+        if x.isdigit() and (i == 0 or pa[i - 1].lower() in TITLE_SEGMENTS):
+            return False
+        moved = True
+    for k, x in qa.items():
+        if x == qb[k]:
+            continue
+        if k.lower() in TITLE_KEYS or not (x.isdigit() and qb[k].isdigit()):
+            return False
+        moved = True
+    return moved
 
 
 def is_ad_url(url):

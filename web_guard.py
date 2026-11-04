@@ -229,6 +229,11 @@ class WebGuard:
             c.active_age = now - self._activity.get(host_of(c.url), -1e9) if host_of(c.url) in self._activity else 1e9
         return out
 
+    def has_fresh_stream(self):
+        """A stream has been requested since the page last changed its address."""
+        with self._lock:
+            return any(not c.stale for c in self._cands.values())
+
     def page_videos(self):
         now = time.time()
         with self._lock:

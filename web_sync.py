@@ -5,7 +5,8 @@ While a cast is active the page's video is a muted remote control: pausing, play
 * pause / play  -> the Roku's Play key (it only toggles, so it's pressed only when the TV is in the other state)
 * scrub, HLS    -> the TV is restarted on the same stream at the new position (the relay serves a playlist that begins
                    there). The RokuCast channel has no seek command, so a seek is a restart.
-* scrub, others -> the Roku's Left / Right keys, 10 s each (MP4 and DASH can't be cut at an arbitrary time)
+* scrub, others -> the Roku's Left / Right keys, 10 s each (MP4 and DASH can't be cut at an arbitrary time, unless
+                   the cast is upscaled: that's HLS on the TV whatever the source was, so it restarts like HLS)
 * drift         -> the muted PC copy is nudged onto the TV's timeline now and then, so the page's slider is honest
 
 Nothing here touches Tk: the owner passes in the guard (page events, mirror and seek commands), a `tv` object with
@@ -22,6 +23,10 @@ class WebSync:
     RECHECK = 15.0    # seconds between drift checks while both are playing
     SEEK_MIN = 2.0    # a jump smaller than this is playback, not a scrub
     MAX_STEPS = 90    # at most 15 minutes of 10 s key presses
+    ENDING = 30.0     # the TV stopping this close to the end is the video finishing, not someone leaving it
+    LEFT_PAGE = "You left the page, so the TV is no longer following it"
+    FINISHED = "That one finished on the TV"
+    TV_STOPPED = "The TV stopped playing this"
 
     def __init__(self, guard, tv, relay_add, log=lambda m: None, on_stop=lambda reason: None):
         self.guard, self.tv, self.relay_add, self.log, self.on_stop = guard, tv, relay_add, log, on_stop
@@ -33,17 +38,20 @@ class WebSync:
         self._thread = None
 
     # ---- lifecycle -----------------------------------------------------------
-    def start(self, cand, offset, page_time=None, title=""):
+    def start(self, cand, offset, page_time=None, title="", restartable=False):
         """Begin following. `offset` is where the TV's stream started (HLS cut) and page_time where the page was
-        when the cast began (used to line up the TV when the stream couldn't be cut)."""
+        when the cast began (used to line up the TV when the stream couldn't be cut). `restartable` says a seek can
+        restart the TV at a new position even though the source isn't HLS."""
         self.stop("", quiet=True)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)             # or it sees active go True again and runs beside the new thread
         self.cand, self.kind, self.dur = cand, cand.kind, float(cand.duration or 0)
+        self.restartable = restartable or cand.kind == "hls"
         self.live = bool(cand.live)
         self.offset, self.title = float(offset or 0), title
         self.epoch0 = self.guard.epoch
         self.settle_until = time.time() + self.SETTLE
+        self.tv_seen = 0.0              # the furthest into the video the TV has been seen
         self.last_check = self.last_mirror = self.last_alive = time.time()
         self._seek_at = None            # (target, when) of the last seek we acted on
         while True:                     # forget events from before the cast
@@ -70,7 +78,7 @@ class WebSync:
     # ---- the loop --------------------------------------------------------------
     def _run(self, page_time):
         try:
-            if page_time and page_time > self.SEEK_MIN + 8 and self.kind != "hls" and not self.live:
+            if page_time and page_time > self.SEEK_MIN + 8 and not self.restartable and not self.live:
                 self._catch_up(page_time)
             while self.active:
                 try:
@@ -106,7 +114,7 @@ class WebSync:
     def _idle(self):
         now = time.time()
         if self.guard.epoch != self.epoch0:
-            return self.stop("You left the page, so the TV is no longer following it")
+            return self.stop(self.LEFT_PAGE)
         if now - self.last_mirror > 3:              # frames that reloaded since need telling again
             self.last_mirror = now
             self.guard.mirror(True)
@@ -114,7 +122,10 @@ class WebSync:
             self.last_alive = now
             st = self.tv.state()
             if st is not None and (st["state"] == "none" or st.get("app") not in ("RokuCast", "")):
-                return self.stop("The TV stopped playing this")
+                ending = self.dur and self.tv_seen >= self.dur - self.ENDING
+                return self.stop(self.FINISHED if ending else self.TV_STOPPED)
+            if st is not None:
+                self.tv_seen = st["pos"] + self.offset
         if now - self.last_check > self.RECHECK:
             self._safe("align", self._align)
 
@@ -180,9 +191,9 @@ class WebSync:
         if tv_now is not None and abs(target - tv_now) < self.SEEK_MIN + (0 if paused else self.lead / 2):
             return                                   # ordinary playback, not a scrub
         self._seek_at = (target, time.time())
-        if self.kind == "hls" and not self.live:
+        if self.restartable and not self.live:
             aim = max(0.0, target + (0 if paused else self.lead))
-            url, sess = self.relay_add(self.cand.url, self.cand.headers, "hls", aim)
+            url, sess = self.relay_add(self.cand.url, self.cand.headers, self.kind, aim)
             t0 = time.time()
             self.tv.cast(url)
             self.settle_until = t0 + self.SETTLE

@@ -1080,7 +1080,7 @@ class App(tk.Tk):
         ui = SimpleNamespace(BG=BG, CARD=CARD, EDGE=EDGE, FG=FG, MUTED=MUTED, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
                              GREEN=GREEN, AMBER=AMBER, RED=RED, GREY=GREY, FONT=FONT, FONT_MED=FONT_MED,
                              RoundButton=RoundButton, NavButton=NavButton, Remote=Remote, log=log)
-        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"))
+        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"))
         self.page = None
         self._show("YouTube" if "--youtube" in sys.argv else "Web" if "--web" in sys.argv else "Listen")
 
@@ -1482,7 +1482,8 @@ class App(tk.Tk):
         try:
             with open(CONFIG, "w", encoding="utf-8") as f:
                 json.dump({"host": self.host.get().strip(), "delay": self._delay(), "volume": self.pc_volume,
-                           "autocast": self.autocast, "web_home": getattr(getattr(self, "web", None), "home", None)}, f)
+                           "autocast": self.autocast, "web_home": getattr(getattr(self, "web", None), "home", None),
+                           "web_upscale": getattr(getattr(self, "web", None), "upscale", "off")}, f)
         except OSError:
             pass
 
