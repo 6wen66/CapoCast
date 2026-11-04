@@ -515,7 +515,8 @@ class Listener:
             [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning", "-protocol_whitelist", "file,udp,rtp",
              "-fflags", "nobuffer", "-flags", "low_delay", "-i", self.sdp_path,
              "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=open(LOG, "a"), creationflags=NO_WINDOW)
+            # its own file: a child's inherited handle doesn't really append on Windows, so it overwrites log() lines
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=open(LOG + ".ffmpeg", "w"), creationflags=NO_WINDOW)
 
         for fn in (self._rtp_loop, self._audio_loop, self._ws_thread):
             t = threading.Thread(target=fn, daemon=True)

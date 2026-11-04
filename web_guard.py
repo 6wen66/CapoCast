@@ -223,7 +223,8 @@ class WebGuard:
     def candidates(self):
         now = time.time()
         with self._lock:
-            out = [Candidate(**{**c.__dict__, "headers": dict(c.headers)}) for c in self._cands.values()]
+            current = [c for c in self._cands.values() if not c.stale] or self._cands.values()
+            out = [Candidate(**{**c.__dict__, "headers": dict(c.headers)}) for c in current]
         for c in out:
             c.active_age = now - self._activity.get(host_of(c.url), -1e9) if host_of(c.url) in self._activity else 1e9
         return out
@@ -541,6 +542,21 @@ class WebGuard:
                 self.last_block = None
             self._url = frame["url"]
 
+    def _on_Page_navigatedWithinDocument(self, p, session):
+        """A site's "next episode" can change the address without loading a page, so frameNavigated never fires. The
+        old streams are only set aside, not dropped: sites also rewrite the address for things that keep the video."""
+        if session != self._main or (self._main_frame and p.get("frameId") != self._main_frame):
+            return
+        key = urllib.parse.urldefrag(p.get("url", ""))[0]
+        with self._lock:
+            if key == self._page_key:
+                return
+            self._page_key = key
+            for c in self._cands.values():
+                c.stale = True
+            count = len(self._cands)
+        self.log(f"page moved to {key[:100]} without loading: {count} earlier streams set aside")
+
     def _on_Page_frameRequestedNavigation(self, p, session):
         if session != self._main or p.get("frameId") != self._main_frame:
             return
@@ -661,6 +677,7 @@ class WebGuard:
                 cand = self._cands[url] = Candidate(url=url, kind=kind, frame=frame, seen=self._arrivals)
             cand.headers = headers
             cand.size = max(cand.size, size)
+            cand.stale = False
 
     def _on_Network_loadingFinished(self, p, session):
         item = self._sniffing.pop((session, p["requestId"]), None)

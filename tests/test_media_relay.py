@@ -1,15 +1,19 @@
 import os
+import socket
 import sys
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import media_relay  # noqa: E402
 from drm import DrmError, refusal_for  # noqa: E402
-from media_relay import MediaRelay, probe_dash, probe_hls, replay_headers, rewrite_hls, trim_hls  # noqa: E402
+from media_relay import MediaRelay, probe_all, probe_dash, probe_hls, replay_headers, rewrite_hls, trim_hls  # noqa: E402
 from stream_finder import Candidate  # noqa: E402
 
 REFERER = "https://anime.example/"
@@ -357,6 +361,63 @@ class Misc(unittest.TestCase):
     def test_drm_sites_are_refused_by_name(self):
         self.assertIn("DRM", refusal_for("https://www.netflix.com/watch/1"))
         self.assertIsNone(refusal_for("https://some-anime-site.example/watch/1"))
+
+
+class ProbeAll(unittest.TestCase):
+    def stalled_server(self):
+        """Accepts connections and never answers, like a stream host that has stopped responding."""
+        srv = socket.socket()
+        self.addCleanup(srv.close)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(16)
+        return srv.getsockname()[1]
+
+    def test_a_stalled_server_cannot_hold_cast_past_the_budget(self):
+        port = self.stalled_server()
+        cands = [Candidate(url=f"http://127.0.0.1:{port}/ep{i}.m3u8", kind="hls") for i in range(5)]
+        t0 = time.time()
+        covered, drm = probe_all(cands, budget=0.5)
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertEqual((covered, drm), ([], []))
+        self.assertTrue(all(c.measured is False for c in cands))
+
+    def test_a_stream_that_answers_is_measured_even_when_another_stalls(self):
+        port = self.stalled_server()
+        good = Candidate(url="http://good/x.m3u8", kind="hls")
+        slow = Candidate(url=f"http://127.0.0.1:{port}/slow.m3u8", kind="hls")
+        real = media_relay.probe_hls
+
+        def probe(c):
+            if c is not good:
+                return real(c)
+            c.duration = 2400.0
+            return ["http://good/v720.m3u8"]
+
+        with mock.patch("media_relay.probe_hls", probe):
+            covered, _ = probe_all([good, slow], budget=0.5)
+        self.assertEqual(covered, ["http://good/v720.m3u8"])
+        self.assertTrue(good.measured)
+        self.assertFalse(slow.measured)
+
+    def test_drm_is_reported_and_a_refused_first_request_is_retried(self):
+        locked = Candidate(url="http://a/locked.m3u8", kind="hls")
+        shy = Candidate(url="http://a/shy.m3u8", kind="hls")
+        tries = []
+
+        def probe(c):
+            if c is locked:
+                raise DrmError("locked")
+            tries.append(c)
+            if len(tries) == 1:
+                raise OSError("refused")
+            return []
+
+        with mock.patch("media_relay.probe_hls", probe):
+            _, drm = probe_all([locked, shy], budget=3)
+        self.assertEqual(len(drm), 1)
+        self.assertIs(drm[0], locked)
+        self.assertEqual(len(tries), 2)
+        self.assertTrue(shy.measured)
 
 
 if __name__ == "__main__":

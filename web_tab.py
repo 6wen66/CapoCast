@@ -22,8 +22,7 @@ from urllib.parse import urlparse
 
 import brave_profile
 import drm
-from drm import DrmError
-from media_relay import MediaRelay, probe_dash, probe_hls
+from media_relay import MediaRelay, probe_all
 from roku_listen import local_ip_for
 from stream_finder import Candidate, apply_page_videos, choose, score
 from web_guard import WebGuard, normalize_address
@@ -36,6 +35,10 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 class CastError(Exception):
     """A problem to tell the user about, in plain words."""
+
+
+class Cancelled(Exception):
+    """You pressed Cancel: this cast's worker stops where it is."""
 
 
 def ytdlp_candidate(page_url):
@@ -94,6 +97,7 @@ class WebTab:
         self.tv = Tv(ui.Remote, lambda: app._host)
         self.profile = brave_profile.profile_dir()
         self.visible = self.busy = False
+        self.attempt, self.cast_at = 0, 0.0               # which cast is current; a worker from an older one stands down
         self.launched_at = 0.0
         self.filters_ok = True
         self.note, self.note_until = ("", ui.MUTED), 0.0
@@ -267,10 +271,13 @@ class WebTab:
                 self.stop_lbl.pack(side="right")
         else:
             self.stop_lbl.pack_forget()
+        self._paint_cast_button()
+
+    def _paint_cast_button(self):
         if self.busy:
-            self.cast_btn.style("Casting…", ui.ACCENT, ui.ACCENT_HI, enabled=False)
+            self.cast_btn.style("Cancel", "#26262b", "#34343a")
         else:
-            self.cast_btn.style("Cast to TV", ui.ACCENT, ui.ACCENT_HI)
+            self.cast_btn.style("Cast to TV", self.ui.ACCENT, self.ui.ACCENT_HI)
 
     def stop_casting(self):
         """Stop following the page, give the page its sound back, and leave the RokuCast channel on the TV."""
@@ -312,18 +319,31 @@ class WebTab:
     # ---- casting -------------------------------------------------------------------------------
     def cast(self):
         if self.busy:
-            return
+            return self.cancel_cast()
         snap = self.guard.snapshot()
         if not self.alive() or not snap["running"]:
             return self._note("Wait for the page to finish opening, then try again.", self.ui.AMBER)
         refusal = drm.refusal_for(snap["url"])
         if refusal:
             return messagebox.showinfo("Can't cast this", refusal, parent=self.app)
-        self.busy = True
+        self.busy, self.cast_at = True, time.time()
+        self.attempt += 1
         if self.sync:
             self.sync.stop("", quiet=True)                # a new cast replaces the old one
         self._note("Looking for the video…", self.ui.AMBER, 60)
-        threading.Thread(target=self._guarded, args=(self._find, snap["url"], snap["title"]), daemon=True).start()
+        threading.Thread(target=self._guarded, args=(self.attempt, self._find, snap["url"], snap["title"]),
+                         daemon=True).start()
+
+    def cancel_cast(self):
+        if time.time() - self.cast_at < 0.6:              # the second half of a double-click on Cast
+            return
+        self.attempt += 1
+        self.busy = False
+        self._note("Cast cancelled", self.ui.MUTED, 6)
+
+    def _check(self, attempt):
+        if attempt != self.attempt:
+            raise Cancelled()
 
     def _post(self, fn):
         try:
@@ -331,45 +351,40 @@ class WebTab:
         except RuntimeError:        # window already closed
             pass
 
-    def _guarded(self, fn, *args):
+    def _guarded(self, attempt, fn, *args):
         try:
-            fn(*args)
+            fn(attempt, *args)
+        except Cancelled:
+            pass
         except CastError as e:
-            self._post(lambda: self._fail(str(e)))
+            message = str(e)                              # Python deletes `e` before the UI gets to run the lambda
+            self._post(lambda: self._fail(attempt, message))
         except Exception as e:
             self.ui.log(f"cast failed: {e!r}")
-            self._post(lambda: self._fail(f"Something went wrong: {e}"))
+            message = f"Something went wrong: {e}"
+            self._post(lambda: self._fail(attempt, message))
 
-    def _fail(self, message):
+    def _fail(self, attempt, message):
+        if attempt != self.attempt:
+            return
+        self.ui.log(f"cast failed: {message.splitlines()[0]}")
         self.busy = False
         self._note(message.splitlines()[0], self.ui.RED, 12)
         if len(message) > 90 or "\n" in message:
             messagebox.showinfo("Can't cast this", message, parent=self.app)
 
-    def _find(self, page_url, title):
+    def _find(self, attempt, page_url, title):
         """Worker thread: decide which stream is the video."""
         cands = self.guard.candidates()
         apply_page_videos(cands, self.guard.page_videos())
         active = self.guard.active_frames()
-        covered, pool, drm_seen = set(), [], False
-        for c in sorted(cands, key=lambda c: score(c, active), reverse=True)[:5]:
-            if c.kind in ("hls", "dash"):
-                try:
-                    covered.update(probe_hls(c) if c.kind == "hls" else probe_dash(c))
-                except DrmError:
-                    drm_seen = True
-                    continue
-                except Exception as e:
-                    self.ui.log(f"probe failed for {c.url[:100]}: {e!r}")
-                    try:                    # some CDNs refuse a first request; one more try before giving up on measuring
-                        time.sleep(0.6)
-                        covered.update(probe_hls(c) if c.kind == "hls" else probe_dash(c))
-                    except DrmError:
-                        drm_seen = True
-                        continue
-                    except Exception:
-                        c.measured = False  # keep it (it may still play) but rank it below streams we could read
-            pool.append(c)
+        top = sorted(cands, key=lambda c: score(c, active), reverse=True)[:5]
+        t0 = time.time()
+        covered, drm = probe_all([c for c in top if c.kind in ("hls", "dash")], self.ui.log)
+        self.ui.log(f"find: {len(cands)} streams, measured {len(top)} in {time.time() - t0:.1f}s")
+        self._check(attempt)
+        drm_seen = bool(drm)
+        pool = [c for c in top if not any(c is d for d in drm)]
         norm = lambda u: urlparse(u)._replace(query="", fragment="").geturl()     # tokens in the query differ per request
         covered = {norm(u) for u in covered}
         for c in pool:
@@ -381,6 +396,7 @@ class WebTab:
                                 "Use the service's own Roku channel instead.")
             self._post(lambda: self._note("No stream seen; asking yt-dlp…", self.ui.AMBER, 60))
             fallback = ytdlp_candidate(page_url)
+            self._check(attempt)
             if not fallback:
                 if decision.unsupported:
                     raise CastError("This site streams in a format CapoCast can't relay yet (it handles HLS, DASH "
@@ -394,12 +410,14 @@ class WebTab:
                             "few seconds, then press Cast.")
         if decision.close:
             options = [decision.best] + decision.close
-            self._post(lambda: self._pick(options, title))
+            self._post(lambda: self._pick(attempt, options, title))
             return
-        self._send(decision.best, title)
+        self._send(attempt, decision.best, title)
 
-    def _pick(self, options, title):
+    def _pick(self, attempt, options, title):
         """Two or more streams look equally like the video: let the user choose."""
+        if attempt != self.attempt:
+            return
         ui = self.ui
         win = tk.Toplevel(self.app)
         win.title("Which one is the video?")
@@ -421,7 +439,7 @@ class WebTab:
             if choice is None:
                 self.busy = False
                 return self._note("")
-            threading.Thread(target=self._guarded, args=(self._send, choice, title), daemon=True).start()
+            threading.Thread(target=self._guarded, args=(attempt, self._send, choice, title), daemon=True).start()
 
         row = tk.Frame(win, bg=ui.BG)
         row.pack(pady=16)
@@ -450,8 +468,9 @@ class WebTab:
             raise CastError(f"Couldn't start the stream server: {e}")
         return self.relay
 
-    def _send(self, cand, title):
+    def _send(self, attempt, cand, title):
         """Worker thread: hand the stream to the relay, tell the Roku to play it, and confirm it arrived."""
+        self._check(attempt)
         ui, host = self.ui, self.app._host
         relay = self._ensure_relay(host)
         # Start where the page already is, not at 0:00. The TV takes a few seconds to start, so aim a little ahead.
@@ -459,6 +478,7 @@ class WebTab:
         start = (page_t + (self.sync.lead if self.sync else 3.0)) if (cand.kind == "hls" and not cand.live
                                                                     and page_t and page_t > 5) else 0.0
         self._fresh_channel(host)
+        self._check(attempt)
         url = relay.add(cand.url, cand.headers, cand.kind, start)
         sess = relay.session_for(url)
         ui.log(f"cast {cand.kind} {cand.url[:140]} -> {url} (from {start:.0f}s)")
@@ -468,8 +488,24 @@ class WebTab:
         except Exception as e:
             raise CastError(str(e))
         self._post(self.app.autocast_off)             # don't let YouTube's auto-cast take the TV back
+        try:
+            self._await_tv(attempt, sess)
+        except Cancelled:
+            self._tv_back()                           # the TV had already been told to play this
+            raise
+        label = title or urlparse(cand.url).hostname or "video"
+        # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
+        if self.sync is None:
+            self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
+        self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label)
+        self._post(lambda: self._cast_done(attempt, label))
+        self._watch_health(sess)
+
+    def _await_tv(self, attempt, sess):
+        """Wait for the TV to fetch the stream and, for a trimmed HLS stream, to learn where it begins."""
         deadline = time.time() + 20
         while time.time() < deadline and not sess.hits and not sess.error:
+            self._check(attempt)
             time.sleep(0.4)
         if sess.error:
             raise CastError(sess.error)
@@ -477,16 +513,11 @@ class WebTab:
             raise CastError(
                 "The TV never asked this PC for the video.\n\nWindows Firewall is the usual cause: when Windows asks, "
                 "allow CapoCast (or Python) on private networks. Also check the Roku IP in the Listen tab.")
-        label = title or urlparse(cand.url).hostname or "video"
-        # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
         end = time.time() + 8
-        while sess.actual_start is None and time.time() < end:       # a trimmed HLS stream says where it begins
+        while sess.actual_start is None and time.time() < end:
+            self._check(attempt)
             time.sleep(0.2)
-        if self.sync is None:
-            self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
-        self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label)
-        self._post(lambda: self._cast_done(label))
-        self._watch_health(sess)
+        self._check(attempt)
 
     def _fresh_channel(self, host):
         """Recasting while the RokuCast channel is still up from the last cast hands the new stream to a player that's
@@ -523,7 +554,9 @@ class WebTab:
         public = relay.add(url, headers, kind, start)
         return public, relay.session_for(public)
 
-    def _cast_done(self, label):
+    def _cast_done(self, attempt, label):
+        if attempt != self.attempt:
+            return
         self.busy = False
         self._note("On TV  ·  " + (label if len(label) <= 52 else label[:51] + "…") + "  ·  following this page",
                    self.ui.GREEN, 20)

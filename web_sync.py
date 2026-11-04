@@ -37,6 +37,8 @@ class WebSync:
         """Begin following. `offset` is where the TV's stream started (HLS cut) and page_time where the page was
         when the cast began (used to line up the TV when the stream couldn't be cut)."""
         self.stop("", quiet=True)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)             # or it sees active go True again and runs beside the new thread
         self.cand, self.kind, self.dur = cand, cand.kind, float(cand.duration or 0)
         self.live = bool(cand.live)
         self.offset, self.title = float(offset or 0), title
@@ -117,10 +119,11 @@ class WebSync:
             self._safe("align", self._align)
 
     def _relevant(self, ev):
-        """Events from the video we cast, not an ad or a preview elsewhere on the page."""
-        if self.dur and ev.get("dur") and abs(ev["dur"] - self.dur) > 3:
-            return False
-        return True
+        """Events from the video we cast, not an ad, a preview thumbnail, or a different video the page swapped in
+        (e.g. a "next episode" click) that hasn't reported its own duration yet."""
+        if not self.dur:
+            return True
+        return bool(ev.get("dur")) and abs(ev["dur"] - self.dur) <= 3
 
     def _handle(self, ev):
         if not self._relevant(ev):

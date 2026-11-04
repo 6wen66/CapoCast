@@ -25,6 +25,7 @@ from yt_bridge import _Server
 PORTS = range(8766, 8771)
 MAX_SESSIONS = 6
 MAX_PLAYLIST = 8_000_000
+PROBE_BUDGET = 12.0     # seconds Cast will wait to measure streams before deciding with what it knows
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/156.0.0.0 Safari/537.36")
 # request headers that must not be replayed (the relay sets its own or they describe the browser's connection)
@@ -484,3 +485,37 @@ def probe_hls(cand):
         except Exception:
             pass
     return covered
+
+
+def probe_all(cands, log=lambda m: None, budget=PROBE_BUDGET):
+    """Measure streams side by side, waiting at most `budget` seconds. One read from a stalled server takes 15 s to
+    fail, so checked in turn a few of them hold the Cast button for minutes.
+
+    Returns (variant URLs, DRM-protected candidates). A stream still unread at the deadline gets measured=False."""
+    covered, drm = [], []
+
+    def one(c):
+        probe = probe_hls if c.kind == "hls" else probe_dash
+        for last_try in (False, True):               # some CDNs refuse a first request
+            try:
+                covered.extend(probe(c))
+                return
+            except DrmError:
+                drm.append(c)
+                return
+            except Exception as e:
+                log(f"probe failed for {c.url[:100]}: {e!r}")
+                if not last_try:
+                    time.sleep(0.6)
+        c.measured = False                           # keep it (it may still play) but rank it below streams we read
+
+    workers = [(c, threading.Thread(target=one, args=(c,), name="stream-probe", daemon=True)) for c in cands]
+    for _, t in workers:
+        t.start()
+    end = time.time() + budget
+    for c, t in workers:
+        t.join(max(0.0, end - time.time()))
+        if t.is_alive() and not c.duration:
+            c.measured = False
+            log(f"probe gave up waiting for {c.url[:100]}")
+    return list(covered), list(drm)

@@ -195,6 +195,7 @@ class Candidate:
     has_video: object = None
     on_page: bool = False           # the page's <video> is playing exactly this URL
     covered: bool = False           # a variant of a master playlist we already have
+    stale: bool = False             # seen before the page changed its address without reloading
 
     def label(self):
         bits = [self.kind.upper()]
