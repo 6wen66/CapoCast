@@ -94,8 +94,8 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 ### Option B: from source
 
 ```powershell
-git clone https://github.com/6wen66/roku-listen.git
-cd roku-listen
+git clone https://github.com/6wen66/CapoCast.git
+cd CapoCast
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -199,7 +199,7 @@ python roku_listen.py --host 192.168.1.50 --delay-ms 300
 ## Project structure
 
 ```
-roku-listen/
+CapoCast/
 ├── roku_listen_gui.py     # desktop app: UI, audio, remote control, auto-cast sync
 ├── roku_listen.py         # protocol helpers + command-line client
 ├── yt_embed.py            # launches and embeds Chrome in the YouTube tab

@@ -27,8 +27,8 @@ Open an issue with the **Feature request** template. Describe the problem you wa
 **Prerequisites:** Windows 10/11, Python 3.11+, [FFmpeg](https://ffmpeg.org/) on your `PATH`, Google Chrome, and a Roku with [Playlet](https://github.com/iBicha/playlet) installed. For the Web tab you also need [Brave](https://brave.com/download/) (opened once, so it has downloaded its ad filters) and the RokuCast channel sideloaded on the Roku.
 
 ```powershell
-git clone https://github.com/6wen66/roku-listen.git
-cd roku-listen
+git clone https://github.com/6wen66/CapoCast.git
+cd CapoCast
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
