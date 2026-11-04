@@ -2,7 +2,7 @@
 
 <img src="assets/youtube.png" width="72" alt="">
 
-# Roku Listen
+# CapoCast
 
 **Your Roku's audio on your PC, a YouTube tab that plays everything you pick on your TV, and a Web tab that casts videos from any other site, with the pop-ups and fake buttons stripped out.**
 
@@ -10,7 +10,7 @@
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)
 
-<img src="docs/screenshots/youtube-tab.png" width="820" alt="Roku Listen YouTube tab">
+<img src="docs/screenshots/youtube-tab.png" width="820" alt="CapoCast YouTube tab">
 
 </div>
 
@@ -18,7 +18,7 @@
 
 ## Why
 
-- **Private listening without your phone.** Roku's "private listening" normally streams TV audio to the Roku mobile app. Roku Listen speaks the same protocol, so the sound plays straight from your PC: no phone, no Bluetooth relay, and much lower latency.
+- **Private listening without your phone.** Roku's "private listening" normally streams TV audio to the Roku mobile app. CapoCast speaks the same protocol, so the sound plays straight from your PC: no phone, no Bluetooth relay, and much lower latency.
 - **YouTube on the TV, driven from your PC.** The YouTube tab is your real Chrome, with your login and all your extensions, embedded in the app. Pick a video and it plays on the TV. Pause, scrub, or switch videos, and the TV follows.
 - **Any other site on the TV, without the junk.** The Web tab is an ad-blocking browser (Brave) built into the app. Browse to anime, obscure streaming sites, anything, press play, then **Cast to TV**. Pop-ups, hijacking redirects and invisible click traps are stopped, and the app sends the real video to the TV, not the ad in front of it.
 
@@ -27,7 +27,7 @@
 
 ## Why Playlet? A free, ad-free YouTube for your TV
 
-Roku Listen plays everything through **Playlet**, a free and open-source YouTube client for Roku. You get what people usually pay a subscription for, plus a few things no official app offers:
+CapoCast plays everything through **Playlet**, a free and open-source YouTube client for Roku. You get what people usually pay a subscription for, plus a few things no official app offers:
 
 - 🔥 **No ads, ever.** No pre-rolls and no unskippable mid-rolls. In the developer's words: *"Not now, not ever."*
 - ⚔️ **[SponsorBlock](https://sponsor.ajay.app/) built in.** Automatically skips sponsor reads, intros, "like and subscribe" reminders and other filler, using the community's crowd-sourced segments.
@@ -35,10 +35,10 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 - 🙋 **Your accounts still work.** Sign in with your YouTube account (or Invidious) to keep your subscriptions and recommendations.
 - ⚡ **Fast.** Without the bloat it's quicker than the official Roku app ([see the comparison](https://youtu.be/qmSvA-QQW20)).
 - 🔮 **Picture-in-picture** on the TV.
-- 📱 **Cast from anywhere:** your phone's YouTube app, a browser, a TV link code, and now your PC through Roku Listen.
+- 📱 **Cast from anywhere:** your phone's YouTube app, a browser, a TV link code, and now your PC through CapoCast.
 - 💸 **Free and open source.** No subscription, no paywall, and the code is public ([AGPL-3.0](https://github.com/iBicha/playlet/blob/main/LICENSE)).
 
-| | Official YouTube app | YouTube Premium | **Playlet + Roku Listen** |
+| | Official YouTube app | YouTube Premium | **Playlet + CapoCast** |
 |---|:---:|:---:|:---:|
 | Price | Free | Monthly subscription | **Free** |
 | Ads | Yes | None | **None** |
@@ -50,7 +50,7 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 | Hear the TV through your PC (private listening) | Phone app only | Phone app only | **✓** |
 
 > [!NOTE]
-> Playlet is an independent project by [iBicha](https://github.com/iBicha/playlet), and Roku Listen isn't affiliated with it. Feature claims above come from [Playlet's own README](https://github.com/iBicha/playlet#features). Like any Roku channel, Roku collects some usage data; Playlet's own telemetry can be turned off in its settings. If you want to support the creators you watch, channel memberships, Patreon and merch go straight to them.
+> Playlet is an independent project by [iBicha](https://github.com/iBicha/playlet), and CapoCast isn't affiliated with it. Feature claims above come from [Playlet's own README](https://github.com/iBicha/playlet#features). Like any Roku channel, Roku collects some usage data; Playlet's own telemetry can be turned off in its settings. If you want to support the creators you watch, channel memberships, Patreon and merch go straight to them.
 
 ## Features
 
@@ -68,12 +68,12 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 | 🛡️ **Pop-up and trap protection** | Closes pop-ups and pop-unders, stops scripted cross-site redirects, removes invisible click-trap layers, denies downloads and notification prompts. Brave's Shields block the ad requests themselves |
 | 🎭 **Decoy filter** | Ignores ad clips, previews, thumbnails and loose segments, and picks the long video from the frame that's actually playing. If two streams look alike, it asks you |
 
-<img src="docs/screenshots/listen-tab.png" width="640" alt="Roku Listen Listen tab">
+<img src="docs/screenshots/listen-tab.png" width="640" alt="CapoCast Listen tab">
 
 ## Prerequisites
 
 - **Windows 10 or 11**
-- **A Roku TV or player that supports private listening.** If the official Roku mobile app can do private listening on your device, Roku Listen can too.
+- **A Roku TV or player that supports private listening.** If the official Roku mobile app can do private listening on your device, CapoCast can too.
 - **[Playlet](https://github.com/iBicha/playlet) installed on the Roku**, for YouTube and auto-cast. See above.
 - **Google Chrome**, signed in to YouTube if you want your own feed.
 - *For the Web tab:* **[Brave](https://brave.com/download/)** (`winget install Brave.Brave`), opened once so it can download its ad filters, and the **RokuCast channel** sideloaded on your Roku (Roku developer mode). The Web tab plays video through that channel.
@@ -85,11 +85,11 @@ Roku Listen plays everything through **Playlet**, a free and open-source YouTube
 
 ### Option A: download (recommended)
 
-1. Grab **`RokuListen.exe`** and **`playlet-cast-extension.zip`** from the [latest release](../../releases/latest).
+1. Grab **`CapoCast.exe`** and **`playlet-cast-extension.zip`** from the [latest release](../../releases/latest).
 2. Unzip the extension somewhere permanent, for example `Documents\playlet-cast`.
 3. In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and select that folder.
 4. Open the extension's **Options** and enter your Roku's IP address. You can find it on the Roku under *Settings → Network → About*.
-5. Run `RokuListen.exe`. If Windows Firewall asks, allow it on **private networks**; the audio arrives over UDP.
+5. Run `CapoCast.exe`. If Windows Firewall asks, allow it on **private networks**; the audio arrives over UDP.
 
 ### Option B: from source
 
@@ -132,7 +132,7 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 
 ### Web tab
 
-1. Switch to the **Web** tab. The first time, Roku Listen starts its own private Brave. Brave has no window of its own: the app draws the page right in the tab and you click, scroll and type in it as normal, so nothing opens on your desktop or takes focus from a game. It has its own profile, so your normal browser and the YouTube tab are untouched, and you sign in to sites separately here.
+1. Switch to the **Web** tab. The first time, CapoCast starts its own private Brave. Brave has no window of its own: the app draws the page right in the tab and you click, scroll and type in it as normal, so nothing opens on your desktop or takes focus from a game. It has its own profile, so your normal browser and the YouTube tab are untouched, and you sign in to sites separately here.
 2. Go to any site and press play on the video. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
 3. Click **Cast to TV**. The app picks the real video and starts it on the TV in the RokuCast channel, from where the page is now. From then on the page's video is a muted remote for the TV, like the YouTube tab:
 
@@ -145,7 +145,7 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 
    The page is muted while the TV follows it. Before you cast, and after you stop, it plays with sound through this PC like any browser. The Listen tab's remote buttons work as well.
 
-| The page tries to… | Roku Listen… |
+| The page tries to… | CapoCast… |
 |---|---|
 | Show ads and trackers | Brave's Shields block the requests |
 | Open a pop-up or pop-under | Closes it. A normal same-site link that wants a new tab opens in the Web view instead |
@@ -178,7 +178,7 @@ python roku_listen.py --host 192.168.1.50 --delay-ms 300
 ## How it works
 
 ```
- ┌───────────── Roku Listen (Python / Tk) ──────────────┐        ┌────────── Roku ──────────┐
+ ┌───────────── CapoCast (Python / Tk) ──────────────┐        ┌────────── Roku ──────────┐
  │  Listen tab ── ECP WebSocket :8060 (auth + setup) ───┼───────▶│  private listening       │
  │      ▲         RTP/Opus audio ◀── UDP :6970 ─────────┼────────│  (audio stream)          │
  │      └ ffmpeg → PCM → volume → speakers              │        │                          │
@@ -220,7 +220,7 @@ roku-listen/
 │   └── popup.* / options.*
 ├── assets/                # Roboto font (Apache 2.0) and icons
 ├── docs/screenshots/
-├── build.ps1              # builds dist\RokuListen.exe + extension zip
+├── build.ps1              # builds dist\CapoCast.exe + extension zip
 └── requirements.txt
 ```
 
@@ -229,13 +229,13 @@ roku-listen/
 | Symptom | Fix |
 |---|---|
 | Status says **Reload Playlet Cast in chrome://extensions** | Check that the extension is loaded and **Developer mode** is on, then click its reload icon. |
-| **Port 8765 is busy** | Another copy of Roku Listen is running. Close it. Opening the app again normally just brings the existing window forward. |
+| **Port 8765 is busy** | Another copy of CapoCast is running. Close it. Opening the app again normally just brings the existing window forward. |
 | **Can't reach Playlet on the Roku** | Open Playlet on the TV and check the Roku IP. |
 | Remote buttons or **Type on TV** do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
-| Connected but no sound | Allow Roku Listen through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
+| Connected but no sound | Allow CapoCast through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
 | Crackling audio | Raise **Delay ms** (try 500–700). |
 | Web tab says **Ad filters missing** | Open Brave normally once so it downloads its filters, then reopen the Web tab (or restart the app). |
-| Web tab says **The TV never asked this PC for the video** | Allow Roku Listen (or Python) through Windows Firewall on **private networks**; the Roku connects to TCP 8766–8770. Also check the Roku IP on the Listen tab. |
+| Web tab says **The TV never asked this PC for the video** | Allow CapoCast (or Python) through Windows Firewall on **private networks**; the Roku connects to TCP 8766–8770. Also check the Roku IP on the Listen tab. |
 | Web tab says **No video found yet** | Press play on the video first, then Cast. For pages whose video can't be seen, install [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`winget install yt-dlp.yt-dlp`) and Cast tries that as a fallback. |
 | **The RokuCast channel isn't installed** | The Web tab plays through the RokuCast channel sideloaded in your Roku's developer mode. |
 | **The Roku refused the command** | Same Roku setting as above: *Control by mobile apps → Network access → Permissive*. |
@@ -254,6 +254,6 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[GPL-3.0](LICENSE) © Roku Listen contributors.
+[GPL-3.0](LICENSE) © CapoCast contributors.
 
-*Roku Listen is an independent project. It is not affiliated with, endorsed by, or sponsored by Roku, Inc., Google LLC or YouTube. Roku, YouTube and their logos are trademarks of their respective owners.*
+*CapoCast is an independent project. It is not affiliated with, endorsed by, or sponsored by Roku, Inc., Google LLC or YouTube. Roku, YouTube and their logos are trademarks of their respective owners.*

@@ -1,4 +1,4 @@
-"""Roku Listen - GUI. Roku private-listening audio on this PC, plus a YouTube tab (embedded Chrome, auto-cast).
+"""CapoCast - GUI. Roku private-listening audio on this PC, plus a YouTube tab (embedded Chrome, auto-cast).
 
 Reuses the protocol helpers from roku_listen.py. Instead of ffplay, audio is decoded by ffmpeg to raw PCM,
 scaled by the volume slider in Python (audioop) and played with sounddevice, so volume works live.
@@ -1037,7 +1037,7 @@ class NavButton(tk.Canvas):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Roku Listen")
+        self.title("CapoCast")
         self.configure(bg=BG)
         cfg = self._load()
         w, h = 1280, 800
@@ -1103,7 +1103,7 @@ class App(tk.Tk):
         self._logo = ImageTk.PhotoImage(Image.open(asset("youtube.png")).resize((30, 30), Image.LANCZOS))
         bar.create_image(22, cy, image=self._logo, anchor="w")
         brand = (FONT, 13, "bold")
-        bar.create_text(60, text_y(brand, cy), text="Roku Listen", anchor="w", fill=FG, font=brand)
+        bar.create_text(60, text_y(brand, cy), text="CapoCast", anchor="w", fill=FG, font=brand)
 
         self.tabs = TabSwitch(bar, ["Listen", "YouTube", "Web"], self._show, seg_w=88)
         bar.create_window(194, cy, window=self.tabs, anchor="w")
@@ -1153,7 +1153,7 @@ class App(tk.Tk):
     def _status_tick(self):
         """Top-bar sync status: extension connection + what's on the TV."""
         if self.bridge_error:
-            self._set_sync_status("Port 8765 is busy - close other copies of Roku Listen", RED)
+            self._set_sync_status("Port 8765 is busy - close other copies of CapoCast", RED)
         elif not self.bridge.connected():
             if self.chrome.waiting():
                 self._set_sync_status("Starting YouTube\u2026", AMBER)
@@ -1598,14 +1598,14 @@ class App(tk.Tk):
 
 
 def already_running():
-    """True (and the existing window is brought forward) if another Roku Listen is already open."""
+    """True (and the existing window is brought forward) if another CapoCast is already open."""
     try:
         kernel32, user32 = ctypes.windll.kernel32, ctypes.windll.user32
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         globals()["_instance_mutex"] = kernel32.CreateMutexW(None, False, "Local\\RokuListen.SingleInstance")
         if kernel32.GetLastError() != 183:   # ERROR_ALREADY_EXISTS
             return False
-        hwnd = user32.FindWindowW(None, "Roku Listen")
+        hwnd = user32.FindWindowW(None, "CapoCast")
         if hwnd:
             user32.ShowWindow(hwnd, 9)        # SW_RESTORE
             user32.SetForegroundWindow(hwnd)
