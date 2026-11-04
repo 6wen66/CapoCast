@@ -1,4 +1,4 @@
-"""Local bridge between the Chrome extension and Roku Listen.
+"""Local bridge between the Chrome extension and CapoCast.
 
 The extension (running in the app's embedded Chrome) POSTs player events to /event (load / play / pause / seek)
 and polls /command for settings and things the app wants Chrome to do (navigate, history, reload). Only requests

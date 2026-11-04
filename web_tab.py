@@ -54,13 +54,13 @@ def ytdlp_candidate(page_url):
     if info.get("_type") == "playlist":
         info = next((e for e in info.get("entries") or [] if e), {})
     if info.get("has_drm"):
-        raise CastError("That video is DRM-protected, which Roku Listen won't cast.")
+        raise CastError("That video is DRM-protected, which CapoCast won't cast.")
     url = info.get("url")
     if not url:
         return None
     kind = "hls" if "m3u8" in (info.get("protocol") or "") else "mp4" if info.get("ext") == "mp4" else None
     if not kind:
-        raise CastError(f"The video is {info.get('ext') or 'in a format'} that Roku Listen can't relay yet (it handles "
+        raise CastError(f"The video is {info.get('ext') or 'in a format'} that CapoCast can't relay yet (it handles "
                         "HLS, DASH and MP4).")
     return Candidate(url=url, kind=kind, headers=info.get("http_headers") or {},
                      duration=float(info.get("duration") or 0), height=int(info.get("height") or 0),
@@ -354,13 +354,13 @@ class WebTab:
         decision = choose(pool, active, unsupported=bool(self.guard.snapshot()["unsupported"]))
         if not decision.best:
             if drm_seen:
-                raise CastError("That video is DRM-protected, which Roku Listen won't cast.\n\n"
+                raise CastError("That video is DRM-protected, which CapoCast won't cast.\n\n"
                                 "Use the service's own Roku channel instead.")
             self._post(lambda: self._note("No stream seen; asking yt-dlp…", self.ui.AMBER, 60))
             fallback = ytdlp_candidate(page_url)
             if not fallback:
                 if decision.unsupported:
-                    raise CastError("This site streams in a format Roku Listen can't relay yet (it handles HLS, DASH "
+                    raise CastError("This site streams in a format CapoCast can't relay yet (it handles HLS, DASH "
                                     "and MP4, not WebM or MKV).")
                 raise CastError("No video found yet. Press play on the video, then Cast.")
             decision.best = fallback
@@ -452,7 +452,7 @@ class WebTab:
         if not sess.hits:
             raise CastError(
                 "The TV never asked this PC for the video.\n\nWindows Firewall is the usual cause: when Windows asks, "
-                "allow Roku Listen (or Python) on private networks. Also check the Roku IP in the Listen tab.")
+                "allow CapoCast (or Python) on private networks. Also check the Roku IP in the Listen tab.")
         label = title or urlparse(cand.url).hostname or "video"
         # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
         end = time.time() + 8

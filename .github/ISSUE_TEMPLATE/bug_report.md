@@ -20,7 +20,7 @@ A clear description of the problem.
 - Roku model and OS (Settings → System → About):
 - Playlet version:
 - Chrome version:
-- Roku Listen version / commit:
+- CapoCast version / commit:
 
 **Log**
 Relevant lines from `%APPDATA%\RokuListen.log` (remove anything private):

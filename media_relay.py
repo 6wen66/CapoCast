@@ -62,7 +62,7 @@ def rewrite_hls(text, base_url, register):
         if line.startswith("#"):
             tag = line.split(":", 1)[0]
             if tag in ("#EXT-X-KEY", "#EXT-X-SESSION-KEY") and key_line_is_drm(line):
-                raise DrmError("This stream's playlist asks for a DRM license, which Roku Listen won't cast.")
+                raise DrmError("This stream's playlist asks for a DRM license, which CapoCast won't cast.")
             if tag == "#EXT-X-STREAM-INF":
                 next_is_playlist = True
             if 'URI="' in line:
@@ -349,7 +349,7 @@ class MediaRelay:
     def _manifest(self, h, sess, resp, head):
         text = resp.read(MAX_PLAYLIST).decode("utf-8", errors="replace")
         if parse_mpd(text)["drm"]:
-            sess.error = "This stream asks for a DRM license, which Roku Listen won't cast."
+            sess.error = "This stream asks for a DRM license, which CapoCast won't cast."
             return self._plain(h, 451, head)
         sess.mpd_url = resp.geturl()                      # where relative segment paths are relative to
         sess._hosts.add(urllib.parse.urlparse(sess.mpd_url).netloc)
@@ -400,7 +400,7 @@ def probe_dash(cand):
     text, _ = fetch_text(cand.url, cand.headers)
     info = parse_mpd(text)
     if info["drm"]:
-        raise DrmError("This stream is DRM-protected, which Roku Listen won't cast.")
+        raise DrmError("This stream is DRM-protected, which CapoCast won't cast.")
     if not info["valid"]:
         raise ValueError("not a manifest")
     cand.height, cand.duration, cand.live, cand.master = info["height"], info["duration"], info["live"], True
@@ -414,7 +414,7 @@ def probe_hls(cand):
     text, final = fetch_text(cand.url, cand.headers)
     info = parse_hls(text, final)
     if info["drm"]:
-        raise DrmError("This stream is DRM-protected, which Roku Listen won't cast.")
+        raise DrmError("This stream is DRM-protected, which CapoCast won't cast.")
     if not info["valid"]:
         raise ValueError("not a playlist")
     cand.master, cand.height, covered = info["master"], info["height"], []
@@ -423,7 +423,7 @@ def probe_hls(cand):
         text2, final2 = fetch_text(info["variants"][0]["url"], cand.headers)
         sub = parse_hls(text2, final2)
         if sub["drm"]:
-            raise DrmError("This stream is DRM-protected, which Roku Listen won't cast.")
+            raise DrmError("This stream is DRM-protected, which CapoCast won't cast.")
         cand.duration, cand.live = sub["duration"], sub["live"]
     else:
         cand.duration, cand.live = info["duration"], info["live"]
