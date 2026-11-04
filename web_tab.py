@@ -349,8 +349,10 @@ class WebTab:
                     except Exception:
                         c.measured = False  # keep it (it may still play) but rank it below streams we could read
             pool.append(c)
+        norm = lambda u: urlparse(u)._replace(query="", fragment="").geturl()     # tokens in the query differ per request
+        covered = {norm(u) for u in covered}
         for c in pool:
-            c.covered = c.url in covered
+            c.covered = norm(c.url) in covered
         decision = choose(pool, active, unsupported=bool(self.guard.snapshot()["unsupported"]))
         if not decision.best:
             if drm_seen:
@@ -435,6 +437,7 @@ class WebTab:
         page_t = self.guard.video_time(cand.duration)
         start = (page_t + (self.sync.lead if self.sync else 3.0)) if (cand.kind == "hls" and not cand.live
                                                                     and page_t and page_t > 5) else 0.0
+        self._fresh_channel(host)
         url = relay.add(cand.url, cand.headers, cand.kind, start)
         sess = relay.session_for(url)
         ui.log(f"cast {cand.kind} {cand.url[:140]} -> {url} (from {start:.0f}s)")
@@ -462,6 +465,37 @@ class WebTab:
             self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
         self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label)
         self._post(lambda: self._cast_done(label))
+        self._watch_health(sess)
+
+    def _fresh_channel(self, host):
+        """Recasting while the RokuCast channel is still up from the last cast hands the new stream to a player that's
+        mid-way through the old one, and the TV can come back with no sound. Back out of the channel first so every
+        cast starts on a clean player."""
+        if self.ui.Remote.active_app(host) != "dev":
+            return
+        try:
+            self.tv.key("Back")
+        except Exception as e:
+            self.ui.log(f"fresh start: Back failed: {e!r}")
+            return
+        end = time.time() + 4
+        while time.time() < end and self.ui.Remote.active_app(host) == "dev":
+            time.sleep(0.25)
+        time.sleep(0.6)
+
+    def _watch_health(self, sess):
+        """For half a minute after a cast, notice if the stream is quietly failing (segments refused or expired),
+        which is how a cast ends up silent or frozen part-way."""
+        end = time.time() + 30
+        while time.time() < end and self.sync is not None and self.sync.active:
+            time.sleep(2)
+            if len(sess.failures) >= 3:
+                codes = sorted({c for c, _ in sess.failures})
+                self.ui.log(f"stream failing: {sess.failures[:6]}")
+                self._post(lambda: self._note(
+                    "Parts of this stream are failing to load" + (f" (HTTP {codes[0]})" if codes[0] else "")
+                    + ". Reload the page and Cast again.", self.ui.AMBER, 20))
+                return
 
     def _relay_add(self, url, headers, kind, start):
         relay = self._ensure_relay(self.app._host)

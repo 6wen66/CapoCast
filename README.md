@@ -169,6 +169,7 @@ Things to know:
 - **Separate subtitle files aren't shown yet.** Subtitles burned into the video are.
 - **Auto-cast switches itself off** while a Web cast is playing, so the YouTube tab doesn't take the TV back. Turn it on again when you want it.
 - **Scrubbing isn't instant.** The RokuCast channel has no "seek to" command, so an HLS scrub restarts the stream at the new position (a couple of seconds) and an MP4 or DASH scrub steps ±10 s at a time. The muted copy on your PC is nudged back onto the TV's timeline now and then, so the page's slider stays honest.
+- **It checks the stream has picture and sound** before casting (a site may serve video and audio as separate playlists), treats the same video offered several times as one, and starts each cast on a fresh channel. If a stream starts failing part-way, the status line says so.
 - **Ads baked into the video itself** can't be removed.
 
 ### Command-line client

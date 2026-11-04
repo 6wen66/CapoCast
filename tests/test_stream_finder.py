@@ -82,6 +82,32 @@ MPD = """<?xml version="1.0"?>
  </AdaptationSet></Period></MPD>"""
 
 
+class AudioHints(unittest.TestCase):
+    def test_codecs_say_there_is_sound(self):
+        m = ('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720,CODECS="avc1.64001f,mp4a.40.2"\nv.m3u8\n')
+        info = parse_hls(m)
+        self.assertTrue(info["audio"])
+        self.assertTrue(info["video"])
+
+    def test_video_only_codecs(self):
+        m = ('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720,CODECS="avc1.64001f"\nv.m3u8\n')
+        self.assertFalse(parse_hls(m)["audio"])
+
+    def test_a_separate_audio_group_counts_as_sound(self):
+        m = ('#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="en",URI="a.m3u8"\n'
+             '#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1280x720,CODECS="avc1.64001f",AUDIO="a"\nv.m3u8\n')
+        self.assertTrue(parse_hls(m)["audio"])
+
+    def test_no_codecs_means_unknown(self):
+        self.assertIsNone(parse_hls(MASTER)["audio"])
+
+    def test_dash_tracks(self):
+        mpd = MPD.replace("</AdaptationSet>", '</AdaptationSet><AdaptationSet mimeType="audio/mp4"/>')
+        info = parse_mpd(mpd)
+        self.assertTrue(info["audio"])
+        self.assertTrue(info["video"])
+
+
 class Dash(unittest.TestCase):
     def test_duration_height_and_live(self):
         info = parse_mpd(MPD)
@@ -160,10 +186,25 @@ class Choosing(unittest.TestCase):
 
     def test_nothing_playing_means_not_playing(self):
         a = cand("https://a.cdn/m.m3u8", duration=1400, master=True)
-        b = cand("https://b.cdn/m.m3u8", duration=1400, master=True)
+        b = cand("https://b.cdn/m.m3u8", duration=1300, master=True)         # a genuinely different video
         d = choose([a, b])
         self.assertFalse(d.playing)
         self.assertTrue(d.close)
+
+    def test_the_same_video_offered_twice_is_not_a_choice(self):
+        a = cand("https://a.cdn/m.m3u8", duration=1400, master=True, height=1080)
+        b = cand("https://b.cdn/m.m3u8", duration=1401, master=True, height=1080)    # a mirror of it
+        self.assertEqual(choose([a, b]).close, [])
+
+    def test_a_picture_without_sound_loses_to_one_with_sound(self):
+        silent = cand("https://a.cdn/v.m3u8", duration=1400, height=1080, has_audio=False, has_video=True, seen=9)
+        good = cand("https://a.cdn/m.m3u8", duration=1400, master=True, height=720, has_audio=True, has_video=True)
+        self.assertIs(choose([silent, good]).best, good)
+
+    def test_audio_only_is_never_the_video(self):
+        sound = cand("https://a.cdn/a.m3u8", duration=1400, has_video=False, has_audio=True)
+        self.assertEqual(reject_reason(sound), "audio only")
+        self.assertIsNone(choose([sound]).best)
 
     def test_unreadable_playlists_rank_below_readable_ones(self):
         ok = cand("https://a.cdn/m.m3u8", duration=1400, master=True, height=1080)
