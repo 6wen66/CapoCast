@@ -113,7 +113,7 @@ class FakeApp:
     update() by hand, so calls from worker threads are queued here and run by drain() on the main thread."""
 
     def __init__(self, root):
-        self.root, self._host, self.autocast_off_called = root, "127.0.0.1", False
+        self.root, self._host, self.autocast_off_called, self.saves = root, "127.0.0.1", False, 0
         self.inbox, self.main_thread = queue.Queue(), threading.get_ident()
 
     def after(self, ms, fn=None, *args):
@@ -132,6 +132,9 @@ class FakeApp:
 
     def autocast_off(self):
         self.autocast_off_called = True
+
+    def _save(self):
+        self.saves += 1
 
 
 def main():
@@ -206,6 +209,16 @@ def main():
         pump(3, lambda: "click trap" in tab.status.cget("text"))
         check("status line shows the protection at work", "click trap" in tab.status.cget("text"),
               repr(tab.status.cget("text")))
+
+        # the start page can be customised: Set as home remembers the current page, Home goes back to it
+        tab.set_home()
+        check("Set as home remembers the current page and saves it", tab.home == tab.guard.snapshot()["url"] == url
+              and app.saves == 1, f"home={tab.home} saves={app.saves}")
+        tab.guard.navigate(url + "page2")
+        pump(4, lambda: tab.guard.snapshot()["url"].endswith("/page2"))
+        tab.go_home()
+        check("Home goes back to it", pump(8, lambda: tab.guard.snapshot()["url"] == url), tab.guard.snapshot()["url"])
+        pump(10, lambda: js("document.getElementById('trap') === null") is True)   # the reloaded page's trap is removed again
 
         # type into the page's text box through the canvas's own handlers
         x, y = center("q")

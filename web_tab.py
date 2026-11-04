@@ -127,6 +127,13 @@ class WebTab:
         self.status.pack(side="left")
         self.allow = tk.Label(strip, text="", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"), cursor="hand2")
         self.allow.bind("<Button-1>", lambda e: self.guard.allow_last_block())
+        # Start page: "Home" goes to it, "Set as home" makes the page you're on the one the Web tab opens with.
+        self.sethome_lbl = tk.Label(strip, text="Set as home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
+        self.sethome_lbl.pack(side="right")
+        self.sethome_lbl.bind("<Button-1>", lambda e: self.set_home())
+        self.home_lbl = tk.Label(strip, text="Home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
+        self.home_lbl.pack(side="right", padx=(0, 12))
+        self.home_lbl.bind("<Button-1>", lambda e: self.go_home())
         self.stop_lbl = tk.Label(strip, text="Stop casting", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"),
                                  cursor="hand2")
         self.stop_lbl.bind("<Button-1>", lambda e: self.stop_casting())
@@ -283,6 +290,20 @@ class WebTab:
             self._post(lambda: self._note(reason, self.ui.AMBER, 12))
         elif reason == "Stopped":
             self._post(lambda: self._note("Stopped casting", self.ui.MUTED, 6))
+
+    def go_home(self):
+        self.guard.navigate(self.home)
+
+    def set_home(self):
+        """Make the page you're on the Web tab's start page (saved, and used every time the tab opens)."""
+        url = self.guard.snapshot()["url"]
+        if not url.startswith(("http://", "https://")):
+            return self._note("Open a page first, then set it as your home page.", self.ui.AMBER)
+        self.home = self.guard.home = url
+        save = getattr(self.app, "_save", None)
+        if save:
+            save()
+        self._note("Home page set to " + (urlparse(url).hostname or url), self.ui.GREEN, 6)
 
     def _go(self, _e=None):
         self.guard.navigate(normalize_address(self.url.get(), self.home))

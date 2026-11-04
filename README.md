@@ -137,7 +137,7 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 *The Web tab on the repo's own test page (`tests/decoy_site.py`), which is full of traps. The status line shows what was stopped.*
 
 1. Switch to the **Web** tab. The first time, CapoCast starts its own private Brave. Brave has no window of its own: the app draws the page right in the tab and you click, scroll and type in it as normal, so nothing opens on your desktop or takes focus from a game. It has its own profile, so your normal browser and the YouTube tab are untouched, and you sign in to sites separately here.
-2. Go to any site and press play on the video. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
+2. Go to any site and press play on the video. **Set as home** (right of the status line) makes the page you're on the start page the Web tab opens with every time, and **Home** takes you back to it. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
 3. Click **Cast to TV**. The app picks the real video and starts it on the TV in the RokuCast channel, from where the page is now. From then on the page's video is a muted remote for the TV, like the YouTube tab:
 
 | You do this on the page | The TV does this |
