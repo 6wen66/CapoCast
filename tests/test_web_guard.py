@@ -6,7 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import brave_profile  # noqa: E402
-from web_guard import _total_size, normalize_address  # noqa: E402
+from web_guard import WebGuard, _total_size, normalize_address  # noqa: E402
 
 
 class Address(unittest.TestCase):
@@ -56,6 +56,41 @@ class FilterSeeding(unittest.TestCase):
     def test_missing_source_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as dst:
             self.assertFalse(brave_profile.seed_filters(dst, source=os.path.join(dst, "nope")))
+
+
+class AddressChangeWithoutReload(unittest.TestCase):
+    def setUp(self):
+        self.guard = WebGuard(lambda m: None, home="about:blank")
+        self.guard._main, self.guard._main_frame, self.guard._page_key = "page", "f1", "https://site/watch?e=4"
+        self.guard._add_candidate("https://cdn/ep4.m3u8", "hls", "f1", {}, 0)
+
+    def move(self, url, session="page", frame="f1"):
+        self.guard._on_Page_navigatedWithinDocument({"frameId": frame, "url": url}, session)
+
+    def urls(self):
+        return [c.url for c in self.guard.candidates()]
+
+    def test_next_episode_leaves_only_the_new_stream(self):
+        self.move("https://site/watch?e=5")
+        self.guard._add_candidate("https://cdn/ep5.m3u8", "hls", "f1", {}, 0)
+        self.assertEqual(self.urls(), ["https://cdn/ep5.m3u8"])
+
+    def test_the_old_stream_stays_usable_when_the_video_did_not_change(self):
+        self.move("https://site/watch?e=4&t=30")
+        self.assertEqual(self.urls(), ["https://cdn/ep4.m3u8"])
+
+    def test_a_stream_requested_again_counts_as_current(self):
+        self.move("https://site/watch?e=5")
+        self.guard._add_candidate("https://cdn/ep5.m3u8", "hls", "f1", {}, 0)
+        self.guard._add_candidate("https://cdn/ep4.m3u8", "hls", "f1", {}, 0)
+        self.assertCountEqual(self.urls(), ["https://cdn/ep4.m3u8", "https://cdn/ep5.m3u8"])
+
+    def test_a_hash_change_or_an_iframe_moving_is_not_a_new_page(self):
+        self.move("https://site/watch?e=4#comments")
+        self.move("https://ads/x", session="iframe")
+        self.move("https://site/other", frame="f2")
+        self.guard._add_candidate("https://cdn/extra.m3u8", "hls", "f1", {}, 0)
+        self.assertCountEqual(self.urls(), ["https://cdn/ep4.m3u8", "https://cdn/extra.m3u8"])
 
 
 if __name__ == "__main__":

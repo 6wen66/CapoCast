@@ -126,6 +126,27 @@ class Mp4Mirroring(Base):
         time.sleep(0.6)
         self.assertEqual(self.tv.keys, [])
 
+    def test_a_video_with_no_duration_yet_is_ignored(self):
+        # e.g. a "next episode" click swaps in a new <video> whose metadata (and duration) hasn't loaded yet;
+        # its early events shouldn't be mistaken for the video we're actually casting.
+        self.event("seeked", t=0.0, dur=0)
+        time.sleep(0.6)
+        self.assertEqual(self.tv.keys, [])
+        self.assertEqual(self.adds, [])
+
+    def test_recasting_stops_the_old_thread_before_the_new_one_runs(self):
+        # e.g. clicking "next episode": start() is called again on the same WebSync while the first thread may
+        # still be mid-loop. If it isn't fully stopped first, both threads read self.guard.page_events and poke
+        # the TV, and a pause can get toggled straight back to play by the stale one.
+        old_thread = self.sync._thread
+        cand2 = Candidate(url="https://site/y.m3u8", kind=self.kind, headers={}, duration=2000)
+        self.sync.start(cand2, offset=0.0, page_time=None, title="Ep2")
+        self.assertFalse(old_thread.is_alive())
+        self.event("pause", paused=True, dur=2000)
+        self.assertTrue(wait_for(lambda: self.tv.st == "pause"))
+        time.sleep(0.6)
+        self.assertEqual(self.tv.keys, ["Play"])
+
     def test_leaving_the_page_stops_following_and_gives_the_sound_back(self):
         self.guard.epoch += 1
         self.assertTrue(wait_for(lambda: bool(self.stopped), 4))
