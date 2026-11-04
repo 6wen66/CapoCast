@@ -75,6 +75,13 @@ class AddressChangeWithoutReload(unittest.TestCase):
         self.guard._add_candidate("https://cdn/ep5.m3u8", "hls", "f1", {}, 0)
         self.assertEqual(self.urls(), ["https://cdn/ep5.m3u8"])
 
+    def test_a_fresh_stream_is_only_reported_once_one_arrives(self):
+        self.assertTrue(self.guard.has_fresh_stream())
+        self.move("https://site/watch?e=5")
+        self.assertFalse(self.guard.has_fresh_stream())
+        self.guard._add_candidate("https://cdn/ep5.m3u8", "hls", "f1", {}, 0)
+        self.assertTrue(self.guard.has_fresh_stream())
+
     def test_the_old_stream_stays_usable_when_the_video_did_not_change(self):
         self.move("https://site/watch?e=4&t=30")
         self.assertEqual(self.urls(), ["https://cdn/ep4.m3u8"])

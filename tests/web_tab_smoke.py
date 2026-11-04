@@ -320,6 +320,52 @@ def main():
                                                           and bool(tab.guard.page_videos())),
               str([v.get("muted") for v in tab.guard.page_videos()]))
         check("stopping tells the TV to leave the channel", "Back" in tv["keys"], str(tv["keys"][-3:]))
+
+        # ---- the page moves on to the next episode, the way a site's own Next button does: new address, no page load ----
+        def go_to(address, episode):
+            js(f"history.pushState({{}}, '', '{address}')")
+            in_video_frame(f"v.src = '/real.mp4?ep={episode}'; v.play(); return 1")
+            return pump(12, lambda: any(f"ep={episode}" in v.get("src", "") and v.get("playing")
+                                        for v in tab.guard.page_videos()))
+
+        def casting():
+            return tab.relay.session_for(roku["launches"][-1][1])._urls["video.mp4"]
+
+        go_to("?e=1", 1)
+        tab.cast()
+        ok = pump(45, lambda: not tab.busy)
+        check("episode 1 casts, and the app starts watching for the next one",
+              ok and "ep=1" in casting() and tab.next.url == url + "?e=1", f"{casting()} watching={tab.next.url}")
+
+        go_to("?e=2", 2)
+        ok = pump(15, lambda: tab.next.counting)
+        check("the page reaching episode 2 brings up the warning", ok and tab.note[0].startswith("Up next"), repr(tab.note[0]))
+        pump(0.6)
+        check("the button offers Cancel during the warning", tab.cast_btn.text == "Cancel", tab.cast_btn.text)
+        ok = pump(15, lambda: "ep=2" in casting())
+        check("the TV follows to episode 2 without anyone pressing Cast", ok, casting())
+        ok = pump(45, lambda: not tab.busy and tab.next.url == url + "?e=2")
+        check("and it keeps watching for episode 3", ok, f"busy={tab.busy} watching={tab.next.url}")
+
+        go_to("?e=3", 3)
+        pump(15, lambda: tab.next.counting)
+        launches = len(roku["launches"])
+        tab.cast()                                                 # the button is Cancel right now
+        pump(10)
+        check("Cancel during the warning keeps the TV on episode 2",
+              len(roku["launches"]) == launches and "ep=2" in casting() and not tab.busy,
+              f"{casting()} note={tab.note[0]!r}")
+
+        go_to("other-page", 4)
+        ok = pump(9, lambda: tab.next.counting)
+        check("a video on a page that isn't the next episode is left alone", not ok and len(roku["launches"]) == launches,
+              f"launches={len(roku['launches'])}")
+
+        go_to("?e=4", 5)
+        tab.stop_casting()
+        ok = pump(9, lambda: tab.next.counting)
+        check("after Stop casting nothing follows", not ok and len(roku["launches"]) == launches,
+              f"launches={len(roku['launches'])}")
     finally:
         tab.close()
         root.destroy()

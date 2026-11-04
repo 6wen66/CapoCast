@@ -161,6 +161,20 @@ class Mp4Mirroring(Base):
         self.assertIn("TV stopped", self.stopped[0])
         self.assertEqual(self.guard.mirrors[-1], False)
 
+    def test_the_tv_stopping_at_the_end_is_the_episode_finishing(self):
+        self.sync.tv_seen = 1395.0
+        self.sync.last_alive = 0
+        self.tv.st = "none"
+        self.assertTrue(wait_for(lambda: bool(self.stopped), 4))
+        self.assertEqual(self.stopped[0], WebSync.FINISHED)
+
+    def test_the_tv_stopping_part_way_is_not_the_episode_finishing(self):
+        self.sync.tv_seen = 700.0
+        self.sync.last_alive = 0
+        self.tv.st = "none"
+        self.assertTrue(wait_for(lambda: bool(self.stopped), 4))
+        self.assertIn("TV stopped", self.stopped[0])
+
     def test_drift_nudges_the_muted_page_onto_the_tv(self):
         self.guard.time_now = 90.0                             # page is 10 s behind the TV
         self.tv.pos = 100.0

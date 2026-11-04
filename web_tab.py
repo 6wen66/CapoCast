@@ -11,6 +11,7 @@ The UI widgets and colors are handed in (`ui`) instead of imported: this file is
 importing that file back would load it a second time.
 """
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -22,7 +23,9 @@ from urllib.parse import urlparse
 
 import brave_profile
 import drm
+import upscaler
 from media_relay import MediaRelay, probe_all
+from next_episode import NextEpisode
 from roku_listen import local_ip_for
 from stream_finder import Candidate, apply_page_videos, choose, score
 from web_guard import WebGuard, normalize_address
@@ -30,6 +33,7 @@ from web_sync import WebSync
 from web_view import PageView
 
 HOME = "https://duckduckgo.com"
+UPSCALE_NAMES = {"off": "Off", "fast": "Anime4K", "hq": "Anime4K HQ", "movie": "Movie"}
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -87,9 +91,11 @@ class Tv:
 
 
 class WebTab:
-    def __init__(self, app, page, ui, home=None):
+    def __init__(self, app, page, ui, home=None, upscale=None):
         self.app, self.page, self.ui = app, page, ui
         self.home = home or HOME
+        self.upscale = upscale if upscale in UPSCALE_NAMES else "off"
+        self.upscaled = None                              # what the TV's upscaled cast was made with, while there is one
         self.guard = WebGuard(ui.log, home=self.home)
         self.proc = None
         self.relay = None
@@ -98,6 +104,7 @@ class WebTab:
         self.profile = brave_profile.profile_dir()
         self.visible = self.busy = False
         self.attempt, self.cast_at = 0, 0.0               # which cast is current; a worker from an older one stands down
+        self.next, self.cast_page = NextEpisode(), ""     # follows the page on to the next episode
         self.launched_at = 0.0
         self.filters_ok = True
         self.note, self.note_until = ("", ui.MUTED), 0.0
@@ -138,6 +145,10 @@ class WebTab:
         self.home_lbl = tk.Label(strip, text="Home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
         self.home_lbl.pack(side="right", padx=(0, 12))
         self.home_lbl.bind("<Button-1>", lambda e: self.go_home())
+        self.upscale_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
+        self.upscale_lbl.pack(side="right", padx=(0, 12))
+        self.upscale_lbl.bind("<Button-1>", lambda e: self.next_upscale())
+        self._paint_upscale()
         self.stop_lbl = tk.Label(strip, text="Stop casting", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"),
                                  cursor="hand2")
         self.stop_lbl.bind("<Button-1>", lambda e: self.stop_casting())
@@ -221,6 +232,7 @@ class WebTab:
                         self.proc.terminate()
                 if self.view.has_frame and self.msg.cget("text"):
                     self._message("")
+                self._watch_next()
             self._refresh()
         except Exception as e:
             self.ui.log(f"web tab error: {e!r}")
@@ -274,13 +286,34 @@ class WebTab:
         self._paint_cast_button()
 
     def _paint_cast_button(self):
-        if self.busy:
+        if self.busy or self.next.counting:
             self.cast_btn.style("Cancel", "#26262b", "#34343a")
         else:
             self.cast_btn.style("Cast to TV", self.ui.ACCENT, self.ui.ACCENT_HI)
 
+    def _paint_upscale(self):
+        on = self.upscale != "off"
+        self.upscale_lbl.config(text="Upscale: " + UPSCALE_NAMES[self.upscale], fg=self.ui.ACCENT if on else self.ui.MUTED)
+
+    def next_upscale(self):
+        """Clicking the label steps through Off, Anime4K, Anime4K HQ and Movie. It applies from the next cast."""
+        names = list(UPSCALE_NAMES)
+        self.upscale = names[(names.index(self.upscale) + 1) % len(names)]
+        if self.upscale != "off":
+            why = upscaler.missing()
+            if why:
+                self.upscale = "off"
+                self._note(why, self.ui.AMBER, 12)
+        self._paint_upscale()
+        save = getattr(self.app, "_save", None)
+        if save:
+            save()
+        if self.upscale != "off":
+            self._note(f"Next cast: upscaled to 4K ({UPSCALE_NAMES[self.upscale]}) on this PC's GPU", self.ui.MUTED, 6)
+
     def stop_casting(self):
         """Stop following the page, give the page its sound back, and leave the RokuCast channel on the TV."""
+        self.next.disarm()
         if self.sync:
             self.sync.stop("Stopped")
         threading.Thread(target=self._tv_back, daemon=True).start()
@@ -293,6 +326,9 @@ class WebTab:
 
     def _following_stopped(self, reason):
         """Called from WebSync's thread when it gives up (page left, TV stopped, or you pressed Stop)."""
+        self._post(self.next.grace if reason in (WebSync.LEFT_PAGE, WebSync.FINISHED) else self.next.disarm)
+        if self.relay and reason in ("Stopped", WebSync.FINISHED, WebSync.TV_STOPPED):
+            self.relay.stop_upscaling()                   # leaving the page doesn't count: the TV is still playing it
         if reason and reason != "Stopped":
             self._post(lambda: self._note(reason, self.ui.AMBER, 12))
         elif reason == "Stopped":
@@ -317,17 +353,37 @@ class WebTab:
         self.view.focus_set()
 
     # ---- casting -------------------------------------------------------------------------------
+    def _watch_next(self):
+        """The page has moved on to the next episode: warn, then take the TV there too."""
+        if self.busy:
+            return
+        snap = self.guard.snapshot()
+        left = self.next.tick(snap["url"], self.guard.page_videos(), self.guard.has_fresh_stream())
+        if left is None:
+            return
+        if left > 0:
+            title = snap["title"] if len(snap["title"]) <= 52 else snap["title"][:51] + "…"
+            return self._note(f"Up next{': ' + title if title else ''}  ·  on the TV in {math.ceil(left)}s",
+                              self.ui.GREEN, 1)
+        self.ui.log(f"next episode: following the page to {snap['url'][:100]}")
+        self.next.disarm()
+        self.cast()
+
     def cast(self):
         if self.busy:
             return self.cancel_cast()
         snap = self.guard.snapshot()
+        if self.next.counting:
+            self.next.skip(snap["url"])
+            return self._note("Staying on what's playing", self.ui.MUTED, 6)
         if not self.alive() or not snap["running"]:
             return self._note("Wait for the page to finish opening, then try again.", self.ui.AMBER)
         refusal = drm.refusal_for(snap["url"])
         if refusal:
             return messagebox.showinfo("Can't cast this", refusal, parent=self.app)
-        self.busy, self.cast_at = True, time.time()
+        self.busy, self.cast_at, self.cast_page = True, time.time(), snap["url"]
         self.attempt += 1
+        self.next.disarm()
         if self.sync:
             self.sync.stop("", quiet=True)                # a new cast replaces the old one
         self._note("Looking for the video…", self.ui.AMBER, 60)
@@ -473,13 +529,19 @@ class WebTab:
         self._check(attempt)
         ui, host = self.ui, self.app._host
         relay = self._ensure_relay(host)
+        relay.stop_upscaling()                            # whatever was being made for the last cast
+        self.upscaled = None
+        plan = self._upscale_plan(cand)
+        self._check(attempt)
         # Start where the page already is, not at 0:00. The TV takes a few seconds to start, so aim a little ahead.
         page_t = self.guard.video_time(cand.duration)
-        start = (page_t + (self.sync.lead if self.sync else 3.0)) if (cand.kind == "hls" and not cand.live
+        start = (page_t + (self.sync.lead if self.sync else 3.0)) if ((cand.kind == "hls" or plan) and not cand.live
                                                                     and page_t and page_t > 5) else 0.0
         self._fresh_channel(host)
         self._check(attempt)
-        url = relay.add(cand.url, cand.headers, cand.kind, start)
+        url = self._start_upscale(attempt, relay, cand, start, plan) if plan else None
+        if not url:
+            url = relay.add(cand.url, cand.headers, cand.kind, start)
         sess = relay.session_for(url)
         ui.log(f"cast {cand.kind} {cand.url[:140]} -> {url} (from {start:.0f}s)")
         self._post(lambda: self._note("Sending to the TV…", ui.AMBER, 60))
@@ -497,9 +559,56 @@ class WebTab:
         # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
         if self.sync is None:
             self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
-        self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label)
+        self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label,
+                        restartable=bool(self.upscaled))
         self._post(lambda: self._cast_done(attempt, label))
         self._watch_health(sess)
+
+    def _upscale_plan(self, cand):
+        """Whether this cast can be upscaled: {'mode', 'duration', 'audio'}, or None to cast it as it is (saying why,
+        so the switch being on and the TV looking the same is never a mystery)."""
+        if self.upscale == "off":
+            return None
+        ui, why = self.ui, upscaler.missing()
+        if not why and cand.live:
+            why = "Live streams aren't upscaled"
+        info = None
+        if not why and (not cand.duration or not cand.height or cand.has_audio is None):
+            self._post(lambda: self._note("Reading the video for upscaling…", ui.AMBER, 30))
+            info = upscaler.probe(cand.url, cand.headers, cand.kind, ui.log)
+        duration = cand.duration or (info or {}).get("duration") or 0
+        height = cand.height or (info or {}).get("height") or 0
+        audio = cand.has_audio if cand.has_audio is not None else (info or {}).get("audio", True)
+        if not why and not duration:
+            why = "Can't upscale this one: its length isn't known"
+        if not why and cand.has_video is False:
+            why = "This stream has no picture to upscale"
+        if not why and height >= upscaler.TARGET_H:
+            why = "This video is already 4K"
+        if why:
+            ui.log(f"upscale skipped: {why}")
+            self._post(lambda: self._note(why + ", casting it as it is", ui.AMBER, 8))
+            return None
+        return {"mode": self.upscale, "duration": duration, "audio": bool(audio)}
+
+    def _start_upscale(self, attempt, relay, cand, start, plan):
+        """Start the encoder and wait for its first piece. Returns the URL for the TV, or None to cast plainly."""
+        ui = self.ui
+        self._post(lambda: self._note(f"Upscaling ({UPSCALE_NAMES[plan['mode']]})…", ui.AMBER, 60))
+        url = relay.add_upscaled(cand.url, cand.headers, cand.kind, start, plan["duration"], plan["mode"], plan["audio"])
+        sess = relay.session_for(url)
+        try:
+            ready = sess.wait_ready(lambda: self._check(attempt))
+        except Cancelled:
+            relay.stop_upscaling()
+            raise
+        if ready:
+            self.upscaled = {**plan, "session": sess}
+            return url
+        ui.log(f"upscale failed, casting plainly: {sess.error}")
+        relay.stop_upscaling()
+        self._post(lambda: self._note("Upscaling failed, casting it as it is", ui.AMBER, 8))
+        return None
 
     def _await_tv(self, attempt, sess):
         """Wait for the TV to fetch the stream and, for a trimmed HLS stream, to learn where it begins."""
@@ -548,16 +657,32 @@ class WebTab:
                     "Parts of this stream are failing to load" + (f" (HTTP {codes[0]})" if codes[0] else "")
                     + ". Reload the page and Cast again.", self.ui.AMBER, 20))
                 return
+        warned = False
+        while not warned and self.sync is not None and self.sync.active:
+            plan = self.upscaled
+            if not plan:
+                return
+            time.sleep(2)
+            warned = plan["session"].stalls >= 3          # a seek swaps the session in the plan, so this follows it
+        if warned:
+            self._post(lambda: self._note("Upscaling is running slower than the video, so the TV may buffer. The site "
+                                          "may be slow, or the GPU busy: try a lighter Upscale setting.", self.ui.AMBER, 20))
 
     def _relay_add(self, url, headers, kind, start):
         relay = self._ensure_relay(self.app._host)
-        public = relay.add(url, headers, kind, start)
+        if self.upscaled:
+            plan = self.upscaled
+            public = relay.add_upscaled(url, headers, kind, start, plan["duration"], plan["mode"], plan["audio"])
+            plan["session"] = relay.session_for(public)
+        else:
+            public = relay.add(url, headers, kind, start)
         return public, relay.session_for(public)
 
     def _cast_done(self, attempt, label):
         if attempt != self.attempt:
             return
         self.busy = False
+        self.next.arm(self.cast_page)
         self._note("On TV  ·  " + (label if len(label) <= 52 else label[:51] + "…") + "  ·  following this page",
                    self.ui.GREEN, 20)
 

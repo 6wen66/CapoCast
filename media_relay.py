@@ -7,6 +7,7 @@ hands the bytes on. HLS playlists are rewritten so every segment and key also co
 Safety: it binds to the PC's LAN address only, answers only the Roku's IP, and only knows URLs created by a cast
 (random tokens), so it can't be used as an open proxy.
 """
+import os
 import re
 import secrets
 import shutil
@@ -20,6 +21,7 @@ from http.server import BaseHTTPRequestHandler
 
 from drm import DrmError, key_line_is_drm
 from stream_finder import parse_hls, parse_mpd
+from upscaler import UpscaleSession, sweep
 from yt_bridge import _Server
 
 PORTS = range(8766, 8771)
@@ -260,8 +262,10 @@ class MediaRelay:
             raise OSError(f"ports {PORTS.start}-{PORTS.stop - 1} are all busy ({last})")
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.log(f"media relay listening on {self.base}")
+        sweep()
 
     def stop(self):
+        self.stop_upscaling()
         if self.server:
             self.server.shutdown()
             self.server.server_close()
@@ -269,11 +273,30 @@ class MediaRelay:
 
     def add(self, url, headers, kind, start=0.0):
         """Register a stream; returns the URL to give the Roku. HLS can begin `start` seconds in."""
-        sess = Session(url, headers, kind, secrets.token_hex(8), start if kind == "hls" else 0.0)
+        return self._keep(Session(url, headers, kind, secrets.token_hex(8), start if kind == "hls" else 0.0))
+
+    def add_upscaled(self, url, headers, kind, start, duration, mode, audio):
+        """Like add(), but the TV gets an upscaled 4K copy made on this PC. Any kind of stream can begin `start` seconds
+        in. One encoder at a time: the GPU has one TV to feed, so this replaces any upscale already running."""
+        self.stop_upscaling()
+        sent = {**{"User-Agent": UA}, **replay_headers(headers)}
+        return self._keep(UpscaleSession(url, sent, kind, secrets.token_hex(8), start, duration, mode, audio, self.log))
+
+    def stop_upscaling(self):
+        with self._lock:
+            running = [s for s in self.sessions.values() if isinstance(s, UpscaleSession)]
+            for s in running:
+                self.sessions.pop(s.token, None)
+        for s in running:
+            s.close()
+
+    def _keep(self, sess):
         with self._lock:
             self.sessions[sess.token] = sess
             for old in sorted(self.sessions.values(), key=lambda s: s.created)[:-MAX_SESSIONS]:
                 self.sessions.pop(old.token, None)
+                if isinstance(old, UpscaleSession):
+                    old.close()
         return f"{self.base}/s/{sess.token}/{sess.entry_name}"
 
     def session_for(self, public_url):
@@ -290,6 +313,8 @@ class MediaRelay:
         req = urllib.parse.urlparse(h.path)
         parts = req.path.split("/")                                   # ['', 's', token, name, ...]
         sess = self.sessions.get(parts[2]) if len(parts) >= 4 and parts[1] == "s" else None
+        if isinstance(sess, UpscaleSession):
+            return self._serve_upscaled(h, sess, parts[3], head) if len(parts) == 4 else self._plain(h, 404, head)
         if sess and (sess.kind == "dash" or len(parts) == 4):
             name = "/".join(parts[3:]) + (f"?{req.query}" if req.query and sess.kind == "dash" else "")
             upstream = sess.url_for(urllib.parse.unquote(name) if sess.kind == "dash" else parts[3])
@@ -324,6 +349,42 @@ class MediaRelay:
             pass                                     # the Roku hung up (seek, channel closed): normal
         finally:
             resp.close()
+
+    def _serve_upscaled(self, h, sess, name, head):
+        """The TV's requests for an upscaled cast are answered from this PC; the site is the encoder's business."""
+        sess.hits += 1
+        text = sess.playlist(name)
+        try:
+            if text is not None:
+                if sess.start > 0 and "#EXTINF" in text:          # the same trim a plain HLS cast seeks with
+                    text, skipped = trim_hls(text, sess.start)
+                    if sess.actual_start is None:
+                        sess.actual_start = skipped
+                body = text.encode()
+                h.send_response(200)
+                h.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                h.send_header("Content-Length", str(len(body)))
+                h.end_headers()
+                if not head:
+                    h.wfile.write(body)
+                return
+            path = sess.file_for(name)
+            if not path:
+                sess.failures.append((0, name))
+                return self._plain(h, 503, head)
+            with open(path, "rb") as f:
+                size = os.fstat(f.fileno()).st_size
+                h.send_response(200)
+                h.send_header("Content-Type", "video/mp4")
+                h.send_header("Content-Length", str(size))
+                h.end_headers()
+                if not head:
+                    began = time.time()
+                    shutil.copyfileobj(f, h.wfile, 65536)
+                    if name.startswith("v") and name.endswith(".m4s"):
+                        sess.sent(size, time.time() - began)
+        except (BrokenPipeError, ConnectionError, TimeoutError):
+            pass                                     # the Roku hung up (seek, channel closed): normal
 
     @staticmethod
     def _plain(h, code, head):

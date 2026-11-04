@@ -66,6 +66,7 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | 🔊 **Volume that follows the sound** | One slider that controls the PC volume (0–200 %) while audio is routed to this PC, and the TV's own volume otherwise, switching by itself and following the TV if you use its remote |
 | 🌐 **Web tab** | Browse any site in a private, windowless Brave (the app draws the page itself), then cast the video on the page to the TV (HLS, DASH and MP4). Pause, play and scrubbing on the page follow on the TV |
 | 🛡️ **Pop-up and trap protection** | Closes pop-ups and pop-unders, stops scripted cross-site redirects, removes invisible click-trap layers, denies downloads and notification prompts. Brave's Shields block the ad requests themselves |
+| ✨ **4K upscaling for the TV** | Your PC sharpens Web tab casts to 4K as they play, with Anime4K for anime or FSRCNNX for live action, and the TV just plays the result (needs an NVIDIA GPU) |
 | 🎭 **Decoy filter** | Ignores ad clips, previews, thumbnails and loose segments, and picks the long video from the frame that's actually playing. If two streams look alike, it asks you |
 
 <img src="docs/screenshots/listen-tab.png" width="640" alt="CapoCast Listen tab">
@@ -78,6 +79,7 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 - **Google Chrome**, signed in to YouTube if you want your own feed.
 - *For the Web tab:* **[Brave](https://brave.com/download/)** (`winget install Brave.Brave`), opened once so it can download its ad filters, and the **RokuCast channel** sideloaded on your Roku (Roku developer mode). The Web tab plays video through that channel.
 - **[FFmpeg](https://ffmpeg.org/download.html) on your `PATH`.** It decodes the audio stream. The easiest install is `winget install Gyan.FFmpeg`.
+- *For upscaling (optional):* an **NVIDIA GPU**, a **4K TV**, and the full FFmpeg build above.
 - The PC and the Roku on the **same network**.
 - *Only when running from source:* Python 3.11 or newer.
 
@@ -138,16 +140,19 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 
 1. Switch to the **Web** tab. The first time, CapoCast starts its own private Brave. Brave has no window of its own: the app draws the page right in the tab and you click, scroll and type in it as normal, so nothing opens on your desktop or takes focus from a game. It has its own profile, so your normal browser and the YouTube tab are untouched, and you sign in to sites separately here.
 2. Go to any site and press play on the video. **Set as home** (right of the status line) makes the page you're on the start page the Web tab opens with every time, and **Home** takes you back to it. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
-3. Click **Cast to TV**. The app picks the real video and starts it on the TV in the RokuCast channel, from where the page is now. While it works the button becomes **Cancel**, so you can back out at any point. To cast the next episode, let it start playing on the page and click **Cast to TV** again. From then on the page's video is a muted remote for the TV, like the YouTube tab:
+3. Click **Cast to TV**. The app picks the real video and starts it on the TV in the RokuCast channel, from where the page is now. While it works the button becomes **Cancel**, so you can back out at any point. From then on the page's video is a muted remote for the TV, like the YouTube tab:
 
 | You do this on the page | The TV does this |
 |---|---|
 | Pause / play | Pauses / plays |
 | Drag the timeline | Jumps there (an HLS stream restarts at the new spot in a couple of seconds; MP4 and DASH step with the Roku's ±10 s keys, up to 15 minutes at a time) |
 | Click **Stop casting** (next to the status line) | Leaves the channel, and the page gets its sound back |
+| Move to the next episode, or the site plays it for you | Follows on its own: an **Up next** warning shows for 5 seconds, with **Cancel** if you'd rather stay put |
 | Go to another page | The TV keeps playing but stops following, and the page gets its sound back |
 
    The page is muted while the TV follows it. Before you cast, and after you stop, it plays with sound through this PC like any browser. The Listen tab's remote buttons work as well.
+
+   The next episode only follows when the page's address looks like the same show (`?s=1&e=5` after `?s=1&e=4`, or `/naruto-episode-5`) and a new full-length video is actually playing, so a trailer or a different movie won't take over the TV. If a site's addresses don't fit that pattern, just click **Cast to TV** on the new episode.
 
 | The page tries to… | CapoCast… |
 |---|---|
@@ -171,6 +176,28 @@ Things to know:
 - **Scrubbing isn't instant.** The RokuCast channel has no "seek to" command, so an HLS scrub restarts the stream at the new position (a couple of seconds) and an MP4 or DASH scrub steps ±10 s at a time. The muted copy on your PC is nudged back onto the TV's timeline now and then, so the page's slider stays honest.
 - **It checks the stream has picture and sound** before casting (a site may serve video and audio as separate playlists), treats the same video offered several times as one, and starts each cast on a fresh channel. If a stream starts failing part-way, the status line says so.
 - **Ads baked into the video itself** can't be removed.
+
+#### Upscaling for the TV
+
+**Upscale** (right of the status line) sends the TV a 4K copy made on your PC. Click it to step through the settings; it applies from the next cast and is remembered.
+
+| Setting | For | What it does |
+|---|---|---|
+| **Off** | Anything | Casts the video as it is, and the TV does its own scaling |
+| **Anime4K** | Anime and cartoons | [Anime4K](https://github.com/bloc97/Anime4K) sharpens line art. Lighter than HQ |
+| **Anime4K HQ** | Anime and cartoons | The same with larger networks |
+| **Movie** | Live action | [FSRCNNX](https://github.com/igv/FSRCNN-TensorFlow) keeps fine detail such as skin and film grain. The gain is subtle, so it's most useful on 720p and 1080p sources |
+
+A Roku can't run shaders, so your PC does the work while you watch, and the TV plays the result. That means:
+
+- **It needs an NVIDIA GPU, a 4K TV, and the full FFmpeg build** (`winget install Gyan.FFmpeg`).
+- **It shares your GPU.** Casting this way during a game costs the game some frames, and a busy GPU can make the TV buffer. If upscaling runs slower than the video, the status line says so.
+- **The cast takes a few seconds longer to start**, and so does each scrub.
+- **Match the setting to the video.** Anime4K sharpens line art, and on live action it can look painted, so use **Movie** there.
+- **It uses more of your network:** up to 16 Mbit/s between the PC and the TV. If the TV buffers on Wi-Fi with the GPU idle, the network is the likely cause.
+- **Web tab only.** The YouTube tab plays in Playlet straight from YouTube, so it never passes through the PC.
+
+Live streams, videos already in 4K and videos of unknown length are cast as they are, and if the upscaler can't start the cast carries on without it. Either way the status line tells you.
 
 ### Command-line client
 
@@ -198,7 +225,7 @@ python roku_listen.py --host 192.168.1.50 --delay-ms 300
 ```
 
 - **Audio:** the app authenticates to the Roku's ECP WebSocket the way the official mobile app does, then asks for the audio stream to be sent to the PC as RTP/Opus. It keeps the stream alive with RTCP receiver reports. FFmpeg decodes it to PCM, and the app applies volume and plays it.
-- **Web:** Brave runs headless (`--headless=new`, no window at all) with a private profile. The app drives it over the Chrome DevTools Protocol (`web_guard.py`): it streams the page as JPEG frames that `web_view.py` draws on a canvas and sends your mouse and keyboard back, closes pop-ups, stops scripted redirects, removes click traps, and records every video stream the page loads with the headers the browser used. `stream_finder.py` discards the decoys and ranks what's left. `media_relay.py` serves the winner to the Roku, replaying those headers and rewriting HLS and DASH manifests so every segment also comes through the PC, and RokuCast plays it. Chrome-family browsers only allow remote debugging on a non-default profile, which is one reason the Web tab has its own. A new profile never downloads Brave's ad filters by itself, so they're copied in from your normal Brave profile on each launch (`brave_profile.py`).
+- **Web:** Brave runs headless (`--headless=new`, no window at all) with a private profile. The app drives it over the Chrome DevTools Protocol (`web_guard.py`): it streams the page as JPEG frames that `web_view.py` draws on a canvas and sends your mouse and keyboard back, closes pop-ups, stops scripted redirects, removes click traps, and records every video stream the page loads with the headers the browser used. `stream_finder.py` discards the decoys and ranks what's left. `media_relay.py` serves the winner to the Roku, replaying those headers and rewriting HLS and DASH manifests so every segment also comes through the PC, and RokuCast plays it. With Upscale on, `upscaler.py` has FFmpeg read the stream instead, run the chosen shader through libplacebo (Vulkan), encode HEVC with NVENC, and the relay serves those pieces as a finished HLS playlist that's filled in as the TV asks. Chrome-family browsers only allow remote debugging on a non-default profile, which is one reason the Web tab has its own. A new profile never downloads Brave's ad filters by itself, so they're copied in from your normal Brave profile on each launch (`brave_profile.py`).
 - **YouTube:** Chrome runs in app mode with your own profile and is re-parented into the app window. The extension watches the main YouTube player (never hover previews or ads) and reports events to the app over a local bridge that only the extension can use. The app mirrors those events to Playlet. Playlet seeks by reloading at a timestamp, which costs a 2–3 s rebuffer, so seeks are aimed ahead by a learned amount, and the muted PC player is then nudged onto the TV's timeline.
 
 ## Project structure
@@ -215,6 +242,7 @@ roku-listen/
 ├── web_guard.py           # DevTools guard: pop-ups, redirects, click traps, stream capture, screencast
 ├── stream_finder.py       # picks the real video out of the decoys (pure logic)
 ├── media_relay.py         # serves a stream to the Roku with the site's headers; HLS rewriting
+├── upscaler.py            # 4K upscaling on the PC's GPU (Anime4K, FSRCNNX), for the Web tab's casts
 ├── brave_profile.py       # the Web tab's private Brave profile and ad-filter seeding
 ├── drm.py                 # refuses DRM-protected sites and streams
 ├── tests/                 # unit tests, plus a hostile test site (guard_smoke.py)
@@ -244,6 +272,9 @@ roku-listen/
 | Web tab says **No video found yet** | Press play on the video first, then Cast. For pages whose video can't be seen, install [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`winget install yt-dlp.yt-dlp`) and Cast tries that as a fallback. |
 | **The RokuCast channel isn't installed** | The Web tab plays through the RokuCast channel sideloaded in your Roku's developer mode. |
 | **The Roku refused the command** | Same Roku setting as above: *Control by mobile apps → Network access → Permissive*. |
+| Web tab says **Upscaling failed, casting it as it is** | The reason is in the log. Check that the NVIDIA driver is up to date and FFmpeg is the full build (`winget install Gyan.FFmpeg`). Some sites also refuse a second reader, and those can only be cast plainly. |
+| Web tab says **Upscaling is running slower than the video** | The site may be slow, or the GPU busy. Close what's using the GPU, or click **Upscale** to a lighter setting (**Anime4K** rather than **Anime4K HQ**, or **Off**) and Cast again. |
+| The TV buffers with Upscale on, but no warning shows | Probably the network. The log's `stream needs … TV took it at …` lines show it: if the second number is close to or below the first, Wi-Fi can't carry the stream. |
 
 The app's log lives at `%APPDATA%\RokuListen.log` and its settings at `%APPDATA%\RokuListen.json`.
 
@@ -255,6 +286,8 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - [**RPListening**](https://github.com/runz0rd/RPListening), originally by William Seemann, for the reverse-engineered Roku private-listening protocol.
 - [**Playlet**](https://github.com/iBicha/playlet) by iBicha, for the open-source YouTube client for Roku and its local web API.
+- [**Anime4K**](https://github.com/bloc97/Anime4K) by bloc97, for the anime upscaling shaders, licensed under MIT (see `assets/anime4k/`).
+- [**FSRCNNX**](https://github.com/igv/FSRCNN-TensorFlow) by igv, for the live-action upscaling shader, licensed under LGPL 3.0 (see `assets/fsrcnnx/`).
 - [**Roboto**](https://fonts.google.com/specimen/Roboto), licensed under Apache 2.0 (see `assets/Roboto-LICENSE.txt`).
 
 ## License

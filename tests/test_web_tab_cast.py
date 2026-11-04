@@ -9,7 +9,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import web_tab  # noqa: E402
+from next_episode import NextEpisode  # noqa: E402
 from stream_finder import Candidate  # noqa: E402
+from web_sync import WebSync  # noqa: E402
 
 
 class FakeRelay:
@@ -22,6 +24,9 @@ class FakeRelay:
 
     def session_for(self, url):
         return self.sess
+
+    def stop_upscaling(self):
+        pass
 
 
 class Base(unittest.TestCase):
@@ -37,6 +42,8 @@ class Base(unittest.TestCase):
                                  ACCENT="acc", ACCENT_HI="hi")
         tab.tv = SimpleNamespace(key=self.keys.append)
         tab.busy, tab.attempt, tab.cast_at, tab.sync = False, 0, 0.0, None
+        tab.upscale, tab.upscaled = "off", None
+        tab.next, tab.cast_page = NextEpisode(), ""
         tab.note, tab.note_until = ("", "m"), 0.0
         tab.relay = FakeRelay(self.sess)
         tab.guard = SimpleNamespace(video_time=lambda d: None, candidates=lambda: [], page_videos=lambda: [],
@@ -154,6 +161,91 @@ class CancelButton(Base):
         self.assertFalse(worker.is_alive())
         self.assertEqual(self.keys, ["Back"])
         self.tab.sync.start.assert_not_called()
+
+
+class FollowingTheNextEpisode(Base):
+    EP4 = "https://s.example/watch/tv/1?s=1&e=4"
+    EP5 = "https://s.example/watch/tv/1?s=1&e=5"
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1000.0
+        tab = self.tab
+        tab.next = NextEpisode(clock=lambda: self.now)
+        tab.cast_page = self.EP4
+        self.url = self.EP5
+        tab.guard.snapshot = lambda: {"unsupported": "", "url": self.url, "title": "Ep 5", "running": True}
+        tab.guard.page_videos = lambda: [{"playing": True, "dur": 2400.0}]
+        tab.guard.has_fresh_stream = lambda: True
+        tab._find = mock.Mock()
+
+    def finish_first_cast(self):
+        self.tab.attempt = 1
+        self.tab.busy = True
+        self.tab._cast_done(1, "Ep 4")
+
+    def wait(self, seconds):
+        for _ in range(int(seconds * 4)):
+            self.now += 0.25
+            self.tab._watch_next()
+
+    def test_a_finished_cast_starts_watching(self):
+        self.finish_first_cast()
+        self.assertEqual(self.tab.next.url, self.EP4)
+
+    def test_the_page_moving_on_warns_with_cancel_then_recasts(self):
+        self.finish_first_cast()
+        self.wait(4)
+        self.assertIn("Up next: Ep 5", self.tab.note[0])
+        self.tab._paint_cast_button()
+        self.assertEqual(self.painted[-1], ("Cancel", True))
+        self.assertFalse(self.tab.busy)
+        self.wait(6)
+        self.assertTrue(self.tab.busy)
+        self.assertEqual(self.tab.cast_page, self.EP5)
+        self.assertIsNone(self.tab.next.url)
+
+    def test_it_watches_again_after_the_recast_lands(self):
+        self.finish_first_cast()
+        self.wait(10)
+        self.tab._cast_done(self.tab.attempt, "Ep 5")
+        self.assertEqual(self.tab.next.url, self.EP5)
+
+    def test_pressing_cancel_keeps_the_tv_where_it_is(self):
+        self.finish_first_cast()
+        self.wait(4)
+        attempt = self.tab.attempt
+        self.tab.cast()
+        self.wait(20)
+        self.assertEqual(self.tab.attempt, attempt)
+        self.assertFalse(self.tab.busy)
+
+    def test_a_failed_recast_does_not_try_forever(self):
+        self.finish_first_cast()
+        self.wait(10)
+        self.tab._fail(self.tab.attempt, "No video found yet.")
+        attempt = self.tab.attempt
+        self.wait(20)
+        self.assertEqual(self.tab.attempt, attempt)
+
+    def test_stop_casting_turns_it_off(self):
+        self.finish_first_cast()
+        self.tab.stop_casting()
+        self.assertIsNone(self.tab.next.url)
+
+    def test_the_tv_being_left_mid_episode_turns_it_off(self):
+        self.finish_first_cast()
+        self.tab._following_stopped("The TV stopped playing this")
+        self.run_ui()
+        self.assertIsNone(self.tab.next.url)
+
+    def test_finishing_or_leaving_the_page_keeps_it_on(self):
+        for reason in (WebSync.FINISHED, WebSync.LEFT_PAGE):
+            self.finish_first_cast()
+            self.tab._following_stopped(reason)
+            self.run_ui()
+            self.assertEqual(self.tab.next.url, self.EP4)
+            self.assertIsNotNone(self.tab.next.expires)
 
 
 if __name__ == "__main__":

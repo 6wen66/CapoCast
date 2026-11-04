@@ -86,6 +86,13 @@ python tests\web_tab_smoke.py     # ~50 s: the real Web tab and Cast button agai
 python tests\formats_smoke.py     # ~2 min: HLS, HLS with a Referer check, disguised HLS, DASH, DASH with absolute URLs
 ```
 
+If you touched the upscaler, run its check too. It needs an NVIDIA GPU and uses a tiny clip, so it's also safe during a game. `--speed` measures the real full-size frame rate and works the GPU flat out for about a minute, so that one isn't:
+
+```powershell
+python tests\upscale_smoke.py           # ~20 s: real FFmpeg, GPU and relay, including seeks and encrypted sources
+python tests\upscale_smoke.py --speed   # ~1 min: can this PC keep up at 720p and 1080p, on every quality?
+```
+
 `web_tab_smoke.py` needs port 8060 free (close CapoCast first) and `formats_smoke.py` loads hls.js and dash.js from a CDN. To try the hostile site by hand, run `python tests\decoy_site.py` and open the printed URL in the Web tab.
 
 The UI and the Roku-facing code have no automated tests, so before opening a PR please also check by hand:
@@ -95,6 +102,7 @@ The UI and the Roku-facing code have no automated tests, so before opening a PR 
 - [ ] **YouTube tab:** Chrome embeds, resizes with the window, and closes with the app.
 - [ ] **Auto-cast:** picking a video plays it on the TV; pause, scrub, and going back to Home all mirror correctly.
 - [ ] **Web tab:** Brave embeds and resizes with the window; on a real video page Cast plays on the TV (check the Windows Firewall prompt on a first run); pause and ±10 s work from the Listen tab; going Web → YouTube → Web keeps both working.
+- [ ] **Upscale:** with it on, a cast plays on the TV with picture and sound in sync; ±10 s on the remote and scrubbing on the page both land in the right place; Stop casting ends the `ffmpeg` process.
 - [ ] No errors in `%APPDATA%\RokuListen.log`.
 
 ## Submitting a pull request
