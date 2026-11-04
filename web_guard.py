@@ -626,6 +626,8 @@ class WebGuard:
         if not r or resp.get("status") not in (200, 206):
             return
         url = resp.get("url") or r["url"]
+        if not url.startswith(("http://", "https://")):
+            return                           # blob: / data: addresses live inside the page; nothing else can fetch them
         kind = classify(url, resp.get("mimeType", ""))
         if kind == "unsupported":
             with self._lock:

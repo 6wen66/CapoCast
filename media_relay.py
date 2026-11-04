@@ -9,6 +9,8 @@ Safety: it binds to the PC's LAN address only, answers only the Roku's IP, and o
 """
 import re
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 import urllib.error
@@ -174,6 +176,7 @@ class Session:
         self._names = {url: self.entry_name}
         self._lock = threading.Lock()
         self.created, self.hits, self.error = time.time(), 0, ""
+        self.failures = []                  # upstream requests that failed, e.g. [(403, 'seg12.ts')]: a stream going bad
         # DASH only: segment URLs are templates, so they can't be registered one by one. They're resolved against
         # the manifest's address, or against a base the manifest itself declared; nothing else is ever fetched.
         self.mpd_url = url if kind == "dash" else None
@@ -303,9 +306,11 @@ class MediaRelay:
             resp = urllib.request.urlopen(urllib.request.Request(upstream, headers=headers), timeout=20)
         except urllib.error.HTTPError as e:
             self.log(f"relay: upstream {e.code} for {upstream[:120]}")
+            sess.failures.append((e.code, parts[3]))
             return self._plain(h, e.code if e.code in (403, 404, 416) else 502, head)
         except Exception as e:
             self.log(f"relay: upstream failed for {upstream[:120]}: {e!r}")
+            sess.failures.append((0, parts[3]))
             return self._plain(h, 502, head)
         try:
             if sess.kind == "dash" and parts[3] == "manifest.mpd":
@@ -395,6 +400,46 @@ def fetch_text(url, headers, timeout=15):
         return resp.read(MAX_PLAYLIST).decode("utf-8", errors="replace"), resp.geturl()
 
 
+def _tracks(data):
+    """Which kinds of track (video / audio) are in a chunk of media, via ffprobe. None if it can't tell."""
+    exe = shutil.which("ffprobe")
+    if not exe or not data:
+        return None
+    try:
+        out = subprocess.run([exe, "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", "-"],
+                             input=data, capture_output=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.decode(errors="replace")
+    except Exception:
+        return None
+    kinds = {l.strip().split(",")[0] for l in out.splitlines() if l.strip()}
+    return kinds or None
+
+
+def inspect_media_playlist(cand, text, base_url):
+    """Look inside the first piece of a media playlist to learn whether it has picture and sound, and note it on cand.
+
+    A site may serve the video and the audio as separate playlists; picking the wrong one casts silence (or a black
+    screen). The playlist alone doesn't say, so fetch the first segment (with its init segment, for fMP4)."""
+    uris, init = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-MAP") and 'URI="' in line:
+            init = urllib.parse.urljoin(base_url, line.split('URI="')[1].split('"')[0])
+        elif line and not line.startswith("#"):
+            uris.append(urllib.parse.urljoin(base_url, line))
+            break
+    if not uris or "#EXT-X-KEY:METHOD=AES-128" in text:
+        return                                       # encrypted segments can't be looked into; leave unknown
+    data = b""
+    for u in ([init] if init else []) + [uris[0]]:
+        req = urllib.request.Request(u, headers={**{"User-Agent": UA}, **replay_headers(cand.headers)})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data += resp.read(400_000)
+    kinds = _tracks(data)
+    if kinds:
+        cand.has_video, cand.has_audio = "video" in kinds, "audio" in kinds
+
+
 def probe_dash(cand):
     """Read a DASH manifest to learn its length and height. Raises DrmError for DRM. Returns [] (no variants)."""
     text, _ = fetch_text(cand.url, cand.headers)
@@ -404,6 +449,7 @@ def probe_dash(cand):
     if not info["valid"]:
         raise ValueError("not a manifest")
     cand.height, cand.duration, cand.live, cand.master = info["height"], info["duration"], info["live"], True
+    cand.has_audio, cand.has_video = info["audio"] or None, info["video"] or None
     return []
 
 
@@ -418,6 +464,7 @@ def probe_hls(cand):
     if not info["valid"]:
         raise ValueError("not a playlist")
     cand.master, cand.height, covered = info["master"], info["height"], []
+    cand.has_audio, cand.has_video = info["audio"], info["video"]
     if info["master"] and info["variants"]:
         covered = [v["url"] for v in info["variants"]]
         text2, final2 = fetch_text(info["variants"][0]["url"], cand.headers)
@@ -425,6 +472,15 @@ def probe_hls(cand):
         if sub["drm"]:
             raise DrmError("This stream is DRM-protected, which CapoCast won't cast.")
         cand.duration, cand.live = sub["duration"], sub["live"]
+        if cand.has_audio is None or cand.has_video is None:        # the master didn't say: look in the media
+            try:
+                inspect_media_playlist(cand, text2, final2)
+            except Exception:
+                pass
     else:
         cand.duration, cand.live = info["duration"], info["live"]
+        try:
+            inspect_media_playlist(cand, text, final)
+        except Exception:
+            pass
     return covered

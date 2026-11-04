@@ -137,7 +137,7 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 *The Web tab on the repo's own test page (`tests/decoy_site.py`), which is full of traps. The status line shows what was stopped.*
 
 1. Switch to the **Web** tab. The first time, CapoCast starts its own private Brave. Brave has no window of its own: the app draws the page right in the tab and you click, scroll and type in it as normal, so nothing opens on your desktop or takes focus from a game. It has its own profile, so your normal browser and the YouTube tab are untouched, and you sign in to sites separately here.
-2. Go to any site and press play on the video. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
+2. Go to any site and press play on the video. **Set as home** (right of the status line) makes the page you're on the start page the Web tab opens with every time, and **Home** takes you back to it. The address box takes URLs or searches. The line under it counts what was blocked and how many video streams were found.
 3. Click **Cast to TV**. The app picks the real video and starts it on the TV in the RokuCast channel, from where the page is now. From then on the page's video is a muted remote for the TV, like the YouTube tab:
 
 | You do this on the page | The TV does this |
@@ -169,6 +169,7 @@ Things to know:
 - **Separate subtitle files aren't shown yet.** Subtitles burned into the video are.
 - **Auto-cast switches itself off** while a Web cast is playing, so the YouTube tab doesn't take the TV back. Turn it on again when you want it.
 - **Scrubbing isn't instant.** The RokuCast channel has no "seek to" command, so an HLS scrub restarts the stream at the new position (a couple of seconds) and an MP4 or DASH scrub steps ±10 s at a time. The muted copy on your PC is nudged back onto the TV's timeline now and then, so the page's slider stays honest.
+- **It checks the stream has picture and sound** before casting (a site may serve video and audio as separate playlists), treats the same video offered several times as one, and starts each cast on a fresh channel. If a stream starts failing part-way, the status line says so.
 - **Ads baked into the video itself** can't be removed.
 
 ### Command-line client

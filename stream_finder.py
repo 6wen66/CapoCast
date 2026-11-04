@@ -98,14 +98,18 @@ def parse_hls(text, base_url=""):
     """Facts about a playlist: master or media, length, live, tallest rendition and its variant URLs."""
     from drm import key_line_is_drm
     info = {"valid": text.lstrip().startswith("#EXTM3U"), "master": False, "duration": 0.0, "live": False,
-            "height": 0, "variants": [], "drm": False}
+            "height": 0, "variants": [], "drm": False, "audio": None, "video": None}
+    codecs, audio_group = [], False
     ended, want_uri, pending = False, False, {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
+        if line.startswith("#EXT-X-MEDIA:") and _attrs(line).get("TYPE") == "AUDIO":
+            audio_group = True                       # the sound is a separate rendition the player combines
         if line.startswith("#EXT-X-STREAM-INF"):
             info["master"], want_uri, pending = True, True, _attrs(line)
+            codecs.append(pending.get("CODECS", ""))
         elif line.startswith("#EXTINF:"):
             try:
                 info["duration"] += float(line[8:].split(",")[0])
@@ -125,6 +129,14 @@ def parse_hls(text, base_url=""):
             info["variants"].append({"url": urllib.parse.urljoin(base_url, line), "height": height,
                                      "bandwidth": int(pending.get("BANDWIDTH", "0") or 0)})
     info["variants"].sort(key=lambda v: (v["height"], v["bandwidth"]), reverse=True)
+    if info["master"]:
+        joined = " ".join(codecs).lower()
+        if audio_group or re.search(r"mp4a|ac-3|ec-3|opus|flac", joined):
+            info["audio"] = True
+        elif joined.strip():
+            info["audio"] = False                    # codecs are listed and none is audio
+        if info["height"] or re.search(r"avc1|hvc1|hev1|av01|vp09", joined):
+            info["video"] = True
     info["live"] = bool(info["valid"] and not info["master"] and not ended)
     return info
 
@@ -140,7 +152,7 @@ def _iso_seconds(text):
 def parse_mpd(text):
     """Facts about a DASH manifest: length, live, tallest rendition, and whether it needs a DRM license."""
     import xml.etree.ElementTree as ET
-    info = {"valid": False, "duration": 0.0, "live": False, "height": 0, "drm": False}
+    info = {"valid": False, "duration": 0.0, "live": False, "height": 0, "drm": False, "audio": False, "video": False}
     try:
         root = ET.fromstring(text)
     except ET.ParseError:
@@ -152,6 +164,10 @@ def parse_mpd(text):
     info["duration"] = _iso_seconds(root.get("mediaPresentationDuration"))
     for el in root.iter():
         tag = el.tag.rsplit("}", 1)[-1]
+        if tag in ("AdaptationSet", "Representation"):
+            kind = (el.get("mimeType") or el.get("contentType") or "").lower()
+            info["audio"] = info["audio"] or kind.startswith("audio")
+            info["video"] = info["video"] or kind.startswith("video")
         if tag in ("Representation", "AdaptationSet") and el.get("height", "").isdigit():
             info["height"] = max(info["height"], int(el.get("height")))
         if tag == "ContentProtection":
@@ -175,6 +191,8 @@ class Candidate:
     seen: int = 0                   # arrival order; a later request beats an earlier one (ads come first)
     active_age: float = 1e9         # seconds since the page last downloaded video pieces from this stream's server
     measured: bool = True           # False if its playlist couldn't be read (length and quality unknown)
+    has_audio: object = None        # True / False once checked, None if unknown
+    has_video: object = None
     on_page: bool = False           # the page's <video> is playing exactly this URL
     covered: bool = False           # a variant of a master playlist we already have
 
@@ -207,6 +225,8 @@ def reject_reason(c):
         return "variant"
     if is_ad_url(c.url):
         return "ad"
+    if c.has_video is False:
+        return "audio only"                          # the sound track on its own: no picture
     if c.live:
         return None
     if c.duration and c.duration < MIN_SECONDS:
@@ -234,6 +254,10 @@ def score(c, active_frames=()):
         s += 150
     if c.active_age < 25:
         s += 250 - c.active_age * 6       # the player is pulling video from this server right now: it's the one playing
+    if c.has_audio is False:
+        s -= 400                                     # a picture with no sound: only if there's nothing else
+    elif c.has_audio:
+        s += 25
     if not c.measured and c.kind != "mp4":
         s -= 70                           # a playlist we couldn't even read is a poor bet
     low = c.url.lower()
@@ -259,5 +283,9 @@ def choose(cands, active_frames=(), unsupported=False):
         return Decision(None, [], rejected, unsupported)
     ranked = sorted(keep, key=lambda c: score(c, active_frames), reverse=True)
     top = score(ranked[0], active_frames)
-    close = [c for c in ranked[1:4] if score(c, active_frames) >= top * 0.75 and c.url != ranked[0].url]
+    best = ranked[0]
+    # The same video offered several times (master + variants, mirror servers, a retry) isn't a choice: only streams
+    # of a clearly different length are real alternatives. Unknown lengths can't be called the same.
+    same = lambda c: bool(c.duration and best.duration and abs(c.duration - best.duration) <= 3)
+    close = [c for c in ranked[1:4] if score(c, active_frames) >= top * 0.75 and c.url != best.url and not same(c)]
     return Decision(ranked[0], close, rejected, unsupported, playing=ranked[0].active_age < 25)

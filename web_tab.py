@@ -127,6 +127,13 @@ class WebTab:
         self.status.pack(side="left")
         self.allow = tk.Label(strip, text="", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"), cursor="hand2")
         self.allow.bind("<Button-1>", lambda e: self.guard.allow_last_block())
+        # Start page: "Home" goes to it, "Set as home" makes the page you're on the one the Web tab opens with.
+        self.sethome_lbl = tk.Label(strip, text="Set as home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
+        self.sethome_lbl.pack(side="right")
+        self.sethome_lbl.bind("<Button-1>", lambda e: self.set_home())
+        self.home_lbl = tk.Label(strip, text="Home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
+        self.home_lbl.pack(side="right", padx=(0, 12))
+        self.home_lbl.bind("<Button-1>", lambda e: self.go_home())
         self.stop_lbl = tk.Label(strip, text="Stop casting", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"),
                                  cursor="hand2")
         self.stop_lbl.bind("<Button-1>", lambda e: self.stop_casting())
@@ -284,6 +291,20 @@ class WebTab:
         elif reason == "Stopped":
             self._post(lambda: self._note("Stopped casting", self.ui.MUTED, 6))
 
+    def go_home(self):
+        self.guard.navigate(self.home)
+
+    def set_home(self):
+        """Make the page you're on the Web tab's start page (saved, and used every time the tab opens)."""
+        url = self.guard.snapshot()["url"]
+        if not url.startswith(("http://", "https://")):
+            return self._note("Open a page first, then set it as your home page.", self.ui.AMBER)
+        self.home = self.guard.home = url
+        save = getattr(self.app, "_save", None)
+        if save:
+            save()
+        self._note("Home page set to " + (urlparse(url).hostname or url), self.ui.GREEN, 6)
+
     def _go(self, _e=None):
         self.guard.navigate(normalize_address(self.url.get(), self.home))
         self.view.focus_set()
@@ -349,8 +370,10 @@ class WebTab:
                     except Exception:
                         c.measured = False  # keep it (it may still play) but rank it below streams we could read
             pool.append(c)
+        norm = lambda u: urlparse(u)._replace(query="", fragment="").geturl()     # tokens in the query differ per request
+        covered = {norm(u) for u in covered}
         for c in pool:
-            c.covered = c.url in covered
+            c.covered = norm(c.url) in covered
         decision = choose(pool, active, unsupported=bool(self.guard.snapshot()["unsupported"]))
         if not decision.best:
             if drm_seen:
@@ -435,6 +458,7 @@ class WebTab:
         page_t = self.guard.video_time(cand.duration)
         start = (page_t + (self.sync.lead if self.sync else 3.0)) if (cand.kind == "hls" and not cand.live
                                                                     and page_t and page_t > 5) else 0.0
+        self._fresh_channel(host)
         url = relay.add(cand.url, cand.headers, cand.kind, start)
         sess = relay.session_for(url)
         ui.log(f"cast {cand.kind} {cand.url[:140]} -> {url} (from {start:.0f}s)")
@@ -462,6 +486,37 @@ class WebTab:
             self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
         self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label)
         self._post(lambda: self._cast_done(label))
+        self._watch_health(sess)
+
+    def _fresh_channel(self, host):
+        """Recasting while the RokuCast channel is still up from the last cast hands the new stream to a player that's
+        mid-way through the old one, and the TV can come back with no sound. Back out of the channel first so every
+        cast starts on a clean player."""
+        if self.ui.Remote.active_app(host) != "dev":
+            return
+        try:
+            self.tv.key("Back")
+        except Exception as e:
+            self.ui.log(f"fresh start: Back failed: {e!r}")
+            return
+        end = time.time() + 4
+        while time.time() < end and self.ui.Remote.active_app(host) == "dev":
+            time.sleep(0.25)
+        time.sleep(0.6)
+
+    def _watch_health(self, sess):
+        """For half a minute after a cast, notice if the stream is quietly failing (segments refused or expired),
+        which is how a cast ends up silent or frozen part-way."""
+        end = time.time() + 30
+        while time.time() < end and self.sync is not None and self.sync.active:
+            time.sleep(2)
+            if len(sess.failures) >= 3:
+                codes = sorted({c for c, _ in sess.failures})
+                self.ui.log(f"stream failing: {sess.failures[:6]}")
+                self._post(lambda: self._note(
+                    "Parts of this stream are failing to load" + (f" (HTTP {codes[0]})" if codes[0] else "")
+                    + ". Reload the page and Cast again.", self.ui.AMBER, 20))
+                return
 
     def _relay_add(self, url, headers, kind, start):
         relay = self._ensure_relay(self.app._host)
