@@ -1,0 +1,12 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>player</title>
+<style>html, body { margin: 0; background: #000 } video { width: 100%; height: 100%; display: block }</style>
+<video id="v" muted></video>
+<script>
+  // A pre-roll ad (12 s) plays first, then the real episode: the case the stream filter has to get right.
+  const v = document.getElementById('v');
+  const play = (src) => { v.src = src; v.play().catch(() => {}); };
+  play('/ad.mp4');
+  setTimeout(() => play('/real.mp4'), 4000);
+</script>
