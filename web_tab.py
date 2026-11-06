@@ -357,8 +357,9 @@ class WebTab:
         mode = (self.upscaled or {}).get("mode")
         state = f"on {site}" if site else "Casting to the TV"
         if mode:
-            state += f" · 4K upscale ({UPSCALE_NAMES[mode]})"
-        self.discord.show(self.SOURCE, title, state, self.cast_since or None, image,
+            name = UPSCALE_NAMES[mode]
+            state += f" · {name} upscale" if "4K" in name else f" · 4K upscale ({name})"      # never says 4K twice
+        self.discord.show(self.SOURCE, f"Watching {title}", state, self.cast_since or None, image,
                           image_text=f"{title} · {site}" if site else title)
 
     def next_upscale(self):
@@ -674,7 +675,11 @@ class WebTab:
         live = (info.get("title") or info.get("og_title") or "").strip() if info and same else ""
         site = discord_presence.site_label(self.cast_page, info.get("site", "") if info and same else "")
         name = discord_presence.clean_title(live or title, site, self.cast_page)
-        image = self.guard.page_image(2.0, cand.duration) if same else ""
+        image = ""
+        if same:
+            found = self.guard.page_images(2.0, cand.duration)
+            image = discord_presence.pick_image(found, log=self.ui.log)
+            self.ui.log(f"discord thumbnail: {image or 'none'} (page offered {len(found)})")
         return name or urlparse(cand.url).hostname or "video", site, image
 
     def _upscale_plan(self, cand):

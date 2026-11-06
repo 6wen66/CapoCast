@@ -1,4 +1,5 @@
 """Regression tests for the bugs found in the review: audio thread survival, device failures, Web cast cleanup."""
+import json
 import os
 import socket
 import sys
@@ -200,7 +201,7 @@ class CastCleanup(Base):
         super().setUp()
         self.stopped = []
         self.tab.relay.stop_upscaling = lambda: self.stopped.append(1)
-        self.tab.guard.page_image = lambda *a: ""
+        self.tab.guard.page_images = lambda *a: []
         self.tab.guard.page_info = lambda *a: {}
         self.tab.discord = None
         self.cand = Candidate(url="https://cdn/ep.m3u8", kind="hls")
@@ -435,11 +436,15 @@ class YouTubeStatus(unittest.TestCase):
         sync._announce("T", "v1")
 
 
-class PageImage(unittest.TestCase):
-    """WebGuard.page_image: the page's own picture for the Discord status, with the browser answered by a stand-in."""
+class BrowserStandIn:
+    """A WebGuard whose browser is answered by a stand-in."""
 
-    def guard(self, evaluated):
+    def guard(self, evaluated, raw=False):
+        """evaluated: what the page script answers. For the picture search, a single address stands in for 'the page's
+        first preview tag'; raw=True passes the text through untouched."""
         from web_guard import WebGuard
+        if not raw and evaluated is not None and not evaluated.startswith("{"):
+            evaluated = json.dumps({"meta": [evaluated] if evaluated else [], "hero": []})
         guard = WebGuard()
         self.addCleanup(guard._stop.set)
 
@@ -449,6 +454,11 @@ class PageImage(unittest.TestCase):
                 arg[1]({"result": {"type": "string", "value": evaluated}})
         threading.Thread(target=browser, daemon=True).start()
         return guard
+
+
+
+class PageImage(BrowserStandIn, unittest.TestCase):
+    """WebGuard.page_image(s): the page's own pictures for the Discord status."""
 
     def video(self, guard, poster, dur=1400.0, age=0.0):
         guard._videos[("s", "f")] = {"at": time.time() - age, "items": [{"poster": poster, "dur": dur}]}
@@ -476,6 +486,20 @@ class PageImage(unittest.TestCase):
         self.video(guard, "https://cdn.example/poster.jpg", age=60.0)
         self.assertEqual(guard.page_image(2.0), "")
 
+    def test_a_logo_picture_gives_way_to_the_poster(self):
+        guard = self.guard("https://cdn.example/site-logo.png")
+        self.video(guard, "https://cdn.example/poster.jpg")
+        self.assertEqual(guard.page_image(2.0), "https://cdn.example/poster.jpg")
+
+    def test_a_site_icon_in_the_first_tag_does_not_hide_the_real_picture_in_a_later_one(self):
+        """Miruro's pages carry the site icon as the first og:image and the show's artwork as a later one."""
+        page = {"meta": ["https://miruro.cx/icon-output.png", "https://s4.anilist.co/banner/43.jpg"],
+                "hero": ["https://image.tmdb.org/t/p/original/hero.jpg"]}
+        guard = self.guard(json.dumps(page))
+        self.video(guard, "https://cdn.example/poster.jpg")
+        self.assertEqual(guard.page_images(2.0), ["https://s4.anilist.co/banner/43.jpg", "https://cdn.example/poster.jpg",
+                                                  "https://image.tmdb.org/t/p/original/hero.jpg"])
+
     def test_a_browser_that_never_answers_costs_only_the_timeout(self):
         guard = self.guard(None)
         began = time.time()
@@ -487,28 +511,28 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class PageInfo(PageImage):
+class PageInfo(BrowserStandIn, unittest.TestCase):
     """WebGuard.page_info and the Web tab's choice of name, site and picture for the Discord status."""
 
     def test_the_live_title_and_site_come_back(self):
-        guard = self.guard('{"url": "https://miruro.cx/w/1", "title": "Frieren - Miruro", "og_title": "", "site": "Miruro"}')
+        guard = self.guard('{"url": "https://miruro.cx/w/1", "title": "Frieren - Miruro", "og_title": "", "site": "Miruro"}', raw=True)
         self.assertEqual(guard.page_info(2.0)["title"], "Frieren - Miruro")
 
     def test_garbage_or_silence_is_just_empty(self):
-        self.assertEqual(self.guard("not json").page_info(2.0), {})
+        self.assertEqual(self.guard("not json", raw=True).page_info(2.0), {})
         self.assertEqual(self.guard(None).page_info(0.3), {})
 
-    def test_a_logo_picture_gives_way_to_the_poster(self):
-        guard = self.guard("https://cdn.example/site-logo.png")
-        self.video(guard, "https://cdn.example/poster.jpg")
-        self.assertEqual(guard.page_image(2.0), "https://cdn.example/poster.jpg")
 
 
 class Describe(unittest.TestCase):
     def tab(self, info, image="https://cdn.example/ep.jpg"):
         tab = web_tab.WebTab.__new__(web_tab.WebTab)
         tab.cast_page = "https://www.miruro.cx/watch/1"
-        tab.guard = SimpleNamespace(page_info=lambda t: info, page_image=lambda t, d: image)
+        tab.guard = SimpleNamespace(page_info=lambda t: info, page_images=lambda t, d: [image] if image else [])
+        tab.ui = SimpleNamespace(log=lambda m: None)
+        patch = mock.patch.object(web_tab.discord_presence, "pick_image", lambda urls, **k: urls[0] if urls else "")
+        patch.start()
+        self.addCleanup(patch.stop)
         return tab
 
     cand = Candidate(url="https://cdn.example/a/ep.m3u8", kind="hls")

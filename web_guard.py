@@ -295,12 +295,24 @@ class WebGuard:
 
     IMAGE_JS = r"""(() => {
       const abs = (u) => { try { return new URL(u, location.href).href; } catch (e) { return ''; } };
-      for (const sel of ['meta[property="og:image:secure_url"]', 'meta[property="og:image"]',
-                         'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]']) {
-        const m = document.querySelector(sel);
-        if (m && m.content && m.content.trim()) return abs(m.content.trim());
+      const meta = [], hero = [];
+      const add = (list, u) => { u = typeof u === 'string' ? abs(u.trim()) : ''; if (u && !list.includes(u)) list.push(u); };
+      // every preview tag, not just the first: single-page sites leave the site's own icon in the first one
+      for (const sel of ['meta[property="og:image:secure_url"]', 'meta[property="og:image"]', 'meta[name="twitter:image"]',
+                         'meta[name="twitter:image:src"]', 'link[rel~="image_src"]'])
+        for (const m of document.querySelectorAll(sel)) add(meta, m.content || m.href || '');
+      const walk = (v) => { if (typeof v === 'string') add(meta, v); else if (Array.isArray(v)) v.forEach(walk);
+                            else if (v && typeof v === 'object') walk(v.url || v.contentUrl || ''); };
+      for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try { const j = JSON.parse(s.textContent); for (const n of (Array.isArray(j) ? j : [j])) walk(n.thumbnailUrl || n.image); } catch (e) {}
       }
-      return '';
+      // last resort: the big picture near the top of the page (a hero backdrop or poster)
+      const big = [...document.images].map(i => ({i, r: i.getBoundingClientRect()}))
+        .filter(({i, r}) => i.naturalWidth >= 400 && i.naturalHeight >= 220 && r.width >= 300 && r.height >= 150
+                            && r.top < 900 && r.bottom > 0)
+        .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height).slice(0, 3);
+      for (const {i} of big) add(hero, i.currentSrc || i.src);
+      return JSON.stringify({meta, hero});
     })()"""
 
     INFO_JS = r"""(() => {
@@ -322,17 +334,19 @@ class WebGuard:
             return {k: str(v) for k, v in info.items()} if isinstance(info, dict) else {}
         return {}
 
-    def page_image(self, timeout=2.0, dur=0):
-        """A picture for what's playing: the page's og:image / twitter:image, else the <video>'s poster. '' if the page
-        has neither (or only a picture that looks like the site's logo). Waits at most `timeout` seconds; never raises."""
+    def page_images(self, timeout=2.0, dur=0):
+        """Every picture the page offers for what's playing, best guess first: its preview tags (og:image, twitter:image,
+        JSON-LD), then the poster of the video being cast, then the big picture near the top of the page. Logos and
+        icons are left out. [] if there is nothing, or the browser doesn't answer in time. Never raises."""
         box, done = [], threading.Event()
         self._cmds.put(("eval", (self.IMAGE_JS, lambda r: (box.append(r), done.set()))))
-        found = ""
+        found = {}
         if done.wait(timeout) and box and isinstance(box[0], dict):
-            found = (box[0].get("result") or {}).get("value") or ""
-        if found.startswith("https://") and not looks_like_logo(found):
-            return found
-        now = time.time()
+            try:
+                found = json.loads((box[0].get("result") or {}).get("value") or "{}")
+            except (TypeError, ValueError):
+                found = {}
+        posters, now = [], time.time()
         with self._lock:
             for e in self._videos.values():
                 if now - e["at"] > 6:
@@ -340,8 +354,17 @@ class WebGuard:
                 for v in e["items"]:
                     poster = v.get("poster") or ""
                     if poster.startswith("https://") and (not dur or not v.get("dur") or abs(v["dur"] - dur) < 3):
-                        return poster
-        return ""
+                        posters.append(poster)
+        out = []
+        for url in [*(found.get("meta") or []), *posters, *(found.get("hero") or [])]:
+            if isinstance(url, str) and url.startswith("https://") and not looks_like_logo(url) and url not in out:
+                out.append(url)
+        return out
+
+    def page_image(self, timeout=2.0, dur=0):
+        """The first picture page_images offers, or ''."""
+        found = self.page_images(timeout, dur)
+        return found[0] if found else ""
 
     def video_playing(self, dur=0):
         now = time.time()
