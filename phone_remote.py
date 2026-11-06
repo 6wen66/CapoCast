@@ -347,6 +347,9 @@ class PhoneRemote:
             b.web_transport(action, value)
         elif name == "cast":
             return 200, {"message": b.web_cast()}, js
+        elif name == "youtube":
+            go = str(body.get("go") or "")[:300]
+            b.web_youtube(bool(body.get("on")), go)
         else:
             return 404, {"error": "not found"}, js
         return 200, {"ok": True}, js
@@ -550,17 +553,23 @@ body.browsing header{display:none}
 .empty{color:var(--muted);text-align:center;padding:30px 10px;font-size:14px}
 #bact #kbd,#bact #star,#bact #pages{flex:0 0 52px;font-size:19px}
 #bact{display:flex;gap:8px;padding:8px}
+#ytlabel,#plbtn{display:none}
+body.ytmode #goform,body.ytmode [data-nav=home],body.ytmode #star,body.ytmode #pages,body.ytmode #bcast,body.ytmode #btrans{display:none}
+body.ytmode #ytlabel{display:block;flex:1;font-weight:600;padding-left:4px}
+body.ytmode #plbtn{display:block}
+body.ytmode #view{background:#000}
+body.ytmode #bstat{display:none!important}
 #bact button{min-height:46px}
-#t-yt.on{display:flex;flex-direction:column;height:calc(100vh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top));
+#t-playlet.on{display:flex;flex-direction:column;height:calc(100vh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top));
   height:calc(100dvh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top))}
-#ytbar{display:flex;gap:8px;align-items:center;padding:8px 10px;font-size:14px;color:var(--muted)}
-#ytbar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#ytbar button{flex:0 0 44px;min-height:40px;font-size:20px;border-radius:12px;padding:0}
-#ytview{position:relative;flex:1;min-height:0;background:#000}
-#ytframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#0f0f0f}
-#ytmsg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
+#plbar{display:flex;gap:8px;align-items:center;padding:8px 10px;font-size:14px;color:var(--muted)}
+#plbar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#plbar button{flex:0 0 44px;min-height:40px;font-size:20px;border-radius:12px;padding:0}
+#plview{position:relative;flex:1;min-height:0;background:#000}
+#plframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#0f0f0f}
+#plmsg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
   padding:30px;color:var(--muted);font-size:14px;line-height:1.5}
-#ytmsg button{flex:0 0 auto;min-width:200px;padding:0 20px}
+#plmsg button{flex:0 0 auto;min-width:200px;padding:0 20px}
 </style></head><body>
 <div id="gone"><h2 style="color:var(--fg)">Open this from CapoCast</h2>
 On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with your phone's camera. This page needs the link it shows.</div>
@@ -594,6 +603,7 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
     <button data-nav="back" aria-label="Back">‹</button><button data-nav="forward" aria-label="Forward">›</button>
     <form id="goform" action="javascript:void(0)"><input id="addr" type="text" inputmode="url" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search or enter address"></form>
     <button data-nav="reload" aria-label="Reload">⟳</button><button data-nav="home" aria-label="Home page">⌂</button>
+    <span id="ytlabel">YouTube</span><button id="plbtn" aria-label="Playlet settings">⚙</button>
   </div>
   <div id="view"><img id="shot" alt="" draggable="false"><div id="vmsg">Opening the browser on your PC…</div><div id="bstat"></div>
     <div id="kb"><input id="kbtext" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Type into the page">
@@ -602,10 +612,10 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
   <div id="bact"><button id="kbd" aria-label="Keyboard">⌨</button><button id="star" aria-label="Bookmark this page">☆</button><button id="pages" aria-label="Bookmarks and history">☰</button><button id="bcast" class="go">Cast this page</button></div>
 </section>
 
-<section class="tab" id="t-yt">
-  <div id="ytbar"><span id="ytwho">Playlet · your YouTube feed and settings</span><button id="ythome" aria-label="Back to Playlet's home">⌂</button></div>
-  <div id="ytview"><iframe id="ytframe" title="Playlet" allow="clipboard-write"></iframe>
-    <div id="ytmsg"><div id="ytmsgtext">Looking for Playlet on the TV…</div><button class="go" id="ytopen" style="display:none">Open Playlet on the TV</button></div></div>
+<section class="tab" id="t-playlet">
+  <div id="plbar"><button id="plback" aria-label="Back to YouTube">‹</button><span id="plwho">Playlet settings</span><button id="plhome" aria-label="Back to Playlet's home">⌂</button></div>
+  <div id="plview"><iframe id="plframe" title="Playlet" allow="clipboard-write"></iframe>
+    <div id="plmsg"><div id="plmsgtext">Looking for Playlet on the TV…</div><button class="go" id="plopen" style="display:none">Open Playlet on the TV</button></div></div>
 </section>
 
 <section class="tab" id="t-cast">
@@ -728,47 +738,77 @@ $("#cast").onclick=async()=>{
 };
 $("#stopcast").onclick=async()=>{ const d=await act("/api/stop",{}); if(d) note("Stopped",true); };
 
-$$("#nav button").forEach(b=>b.onclick=()=>{
-  $$("#nav button").forEach(x=>x.classList.toggle("on",x===b));
-  $$(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+b.dataset.tab));
-  document.body.classList.toggle("browsing",b.dataset.tab==="browse"||b.dataset.tab==="yt");
-  if(b.dataset.tab==="apps") loadApps();
-  browse(b.dataset.tab==="browse");
-  ytShow(b.dataset.tab==="yt");
-});
+// The YouTube tab is the real youtube.com, in the PC's browser (the Browse tab's picture), drawn black. Tapping a video
+// there plays it on the TV through Playlet instead of in the browser. Playlet's own settings page is one tap away (⚙).
+let ytSub=false, curTab="remote";
+function showTab(tab){
+  curTab=tab;
+  const yt=tab==="yt", sec=yt?(ytSub?"playlet":"browse"):tab;
+  $$("#nav button").forEach(x=>x.classList.toggle("on",x.dataset.tab===tab));
+  $$(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+sec));
+  document.body.classList.toggle("browsing",sec==="browse"||sec==="playlet");
+  document.body.classList.toggle("ytmode",yt&&!ytSub);
+  if(tab==="apps") loadApps();
+  browse(sec==="browse");
+  ytSession(yt&&!ytSub);
+  plShow(yt&&ytSub);
+}
+$$("#nav button").forEach(b=>b.onclick=()=>{ if(b.dataset.tab==="yt") ytSub=false; showTab(b.dataset.tab); });
+$("#plbtn").onclick=()=>{ ytSub=true; showTab("yt"); };
+$("#plback").onclick=()=>{ ytSub=false; showTab("yt"); };
 
-// ---- YouTube: Playlet's own web app (your feed, search and every setting). The Roku serves it, on its own, while Playlet is
-// open on the TV, so this tab only has to find it, open Playlet if it isn't, and show it.
-const ytf=$("#ytframe");
-let ytOn=false, ytRun=0, ytLoaded=false, ytDown=false, ytBase="";
-function ytMsg(text,button){ $("#ytmsg").style.display=text?"flex":"none"; $("#ytmsgtext").textContent=text||""; $("#ytopen").style.display=button?"block":"none"; }
-function ytShow(on){ ytOn=on; ytRun++; if(on) ytLoop(ytRun); }
-async function ytLoop(id){
-  while(ytOn&&id===ytRun){
+// While this tab is open the phone renews a switch on the PC (every few seconds; it lapses by itself if the phone goes away):
+// YouTube is drawn black and a tapped video goes to the TV. The first time, it also opens YouTube if the browser is elsewhere.
+let ytBeat=0, ytWasOn=false, ytGo=false;
+const ytHost=u=>/(^|\.)youtube\.com$|^accounts\.google\./.test(host(u||""));
+async function ytTick(){
+  try{
+    let go="";
+    if(ytGo){
+      const i=await api("/api/web/info");
+      if(i.ready){ if(!ytHost(i.url)) go="https://www.youtube.com/"; ytGo=false; }
+    }
+    await api("/api/web/youtube",{on:true,go});
+  }catch(e){}
+}
+function ytSession(on){
+  clearInterval(ytBeat); ytBeat=0;
+  if(on){ ytWasOn=true; ytGo=true; ytTick(); ytBeat=setInterval(ytTick,5000); }
+  else if(ytWasOn){ ytWasOn=false; api("/api/web/youtube",{on:false}).catch(()=>{}); }
+}
+
+// ---- Playlet's own web app (its settings, and the feed of the account signed in on the Roku). The Roku serves it, on its own,
+// while Playlet is open on the TV, so this only has to find it, open Playlet if it isn't, and show it.
+const plf=$("#plframe");
+let plOn=false, plRun=0, plLoaded=false, plDown=false, plBase="";
+function plMsg(text,button){ $("#plmsg").style.display=text?"flex":"none"; $("#plmsgtext").textContent=text||""; $("#plopen").style.display=button?"block":"none"; }
+function plShow(on){ plOn=on; plRun++; if(on) plLoop(plRun); }
+async function plLoop(id){
+  while(plOn&&id===plRun){
     let p;
     try{ p=await api("/api/playlet"); }
-    catch(e){ ytMsg(e.message,false); await sleep(2500); continue; }
-    if(!ytOn||id!==ytRun) return;
+    catch(e){ plMsg(e.message,false); await sleep(2500); continue; }
+    if(!plOn||id!==plRun) return;
     if(p.up){
-      ytBase=p.url;
-      $("#ytwho").textContent="Playlet"+(p.account?" · signed in as "+p.account:"");
-      if(!ytLoaded||ytDown){ ytf.src=ytBase; ytLoaded=true; ytDown=false; }
-      ytf.style.display="block"; ytMsg("");
-      return;                                        // it stays open while you use it; switching back here checks again
+      plBase=p.url;
+      $("#plwho").textContent="Playlet"+(p.account?" · signed in as "+p.account:"");
+      if(!plLoaded||plDown){ plf.src=plBase; plLoaded=true; plDown=false; }
+      plf.style.display="block"; plMsg("");
+      return;                                        // it stays open while you use it; coming back here checks again
     }
-    if(ytLoaded) ytDown=true;                        // Playlet was closed on the TV: reload it once it is back
-    ytf.style.display="none";
-    ytMsg("Playlet isn't open on the TV. It has to be open for its feed to show here.",true);
-    $("#ytopen").dataset.id=p.id||"";
+    if(plLoaded) plDown=true;                        // Playlet was closed on the TV: reload it once it is back
+    plf.style.display="none";
+    plMsg("Playlet isn't open on the TV. It has to be open for its settings to show here.",true);
+    $("#plopen").dataset.id=p.id||"";
     await sleep(2000);
   }
 }
-$("#ytopen").onclick=async()=>{
-  const id=$("#ytopen").dataset.id; if(!id) return;
-  ytMsg("Opening Playlet on the TV…",false);
+$("#plopen").onclick=async()=>{
+  const id=$("#plopen").dataset.id; if(!id) return;
+  plMsg("Opening Playlet on the TV…",false);
   await act("/api/launch",{id});
 };
-$("#ythome").onclick=()=>{ if(ytBase&&ytLoaded) ytf.src=ytBase; else ytShow(true); };
+$("#plhome").onclick=()=>{ if(plBase&&plLoaded) plf.src=plBase; else plShow(true); };
 
 // ---- Browse: the PC's browser as a live picture. Taps, drags and typing go back to it.
 const view=$("#view"), shot=$("#shot");

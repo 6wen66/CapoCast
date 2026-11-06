@@ -95,6 +95,38 @@ PAGE_JS = r"""
     } catch (x) {}
   }, true);
 
+  // ---- the phone's YouTube tab (the app sets the rl_yt cookie on youtube.com while that tab is open) ----
+  // A tap on a video plays it on the TV through Playlet instead of opening it here, and the page is drawn black.
+  const ytOn = () => /(^|; )rl_yt=1/.test(document.cookie);
+  const ytWatch = (href) => {
+    try {
+      const u = new URL(href, location.href), h = u.hostname;
+      if (h === 'youtu.be') return u.pathname.length > 1 ? u.href : '';
+      if (!/(^|\.)youtube\.com$/.test(h)) return '';
+      if (u.pathname === '/watch' && u.searchParams.get('v')) return u.href;
+      if (/^\/(shorts|live)\/[\w-]{6,}/.test(u.pathname)) return u.href;
+    } catch (x) {}
+    return '';
+  };
+  addEventListener('click', (e) => {
+    if (!e.isTrusted || window !== top || !ytOn()) return;
+    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    const w = a && ytWatch(a.href);
+    if (!w) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    call('rlYoutube', w);
+  }, true);
+  if (window === top && /(^|\.)youtube\.com$/.test(location.hostname) && ytOn()) {
+    const paint = () => {
+      if (document.getElementById('rl-black') || !document.documentElement) return;
+      const css = document.createElement('style');
+      css.id = 'rl-black'; css.textContent = __YT_BLACK__;
+      document.documentElement.appendChild(css);
+    };
+    paint();
+    document.addEventListener('DOMContentLoaded', paint);
+  }
+
   // ---- mirroring: while a Web cast plays on the TV, this page's video is a muted remote control for it ----
   let mirror = false, ignoreUntil = 0;
   const muted = new WeakSet();
@@ -139,6 +171,35 @@ PAGE_JS = r"""
   });
 })();
 """
+
+
+# YouTube's own dark theme is dark grey; the phone's YouTube tab pushes it to true black (kind to an OLED screen)
+YT_BLACK_CSS = """
+html, html[dark], [dark] {
+  --yt-spec-base-background: #000 !important; --yt-spec-general-background-a: #000 !important;
+  --yt-spec-general-background-b: #000 !important; --yt-spec-general-background-c: #000 !important;
+  --yt-spec-raised-background: #0a0a0a !important; --yt-spec-menu-background: #0a0a0a !important;
+  --yt-spec-additive-background: #1a1a1a !important; --yt-spec-badge-chip-background: #1a1a1a !important;
+  --yt-spec-brand-background-solid: #000 !important; --yt-spec-brand-background-primary: #000 !important;
+}
+html, body, ytd-app, ytm-app, #page-manager, ytd-browse, .page-container, ytm-browse, ytm-mobile-topbar-renderer,
+ytm-pivot-bar-renderer, #masthead-container, ytd-masthead, #background { background: #000 !important; }
+"""
+PAGE_JS = PAGE_JS.replace("__YT_BLACK__", json.dumps(YT_BLACK_CSS))
+
+
+def dark_pref(cookies):
+    """The PREF cookie value that turns YouTube's dark theme on, keeping whatever else the cookie already says.
+    `cookies` is the list Network.getCookies returns. The theme is two bits of PREF's f6 flags (hex)."""
+    value = next((c.get("value", "") for c in cookies if c.get("name") == "PREF"), "")
+    parts = [p for p in value.split("&") if p and not p.startswith("f6=")]
+    old = next((p[3:] for p in value.split("&") if p.startswith("f6=")), "")
+    try:
+        flags = int(old, 16) if old else 0
+    except ValueError:
+        flags = 0
+    parts.append("f6=%x" % ((flags & ~0x80000) | 0x400))      # 0x400 = dark, 0x80000 = light
+    return "&".join(parts)
 
 
 def _total_size(headers):
@@ -191,6 +252,8 @@ class WebGuard:
         self._subs = {}                  # separate subtitle files the page has fetched: url -> {url, headers, frame}
         self._activity = {}              # host -> when the page last downloaded video pieces from it
         self._last_gesture = 0.0
+        self.on_youtube = None           # called with the address of a YouTube video tapped in the phone's YouTube tab
+        self._yt_dark = False            # YouTube's theme cookie has been set in this browser
         self._allowed = {}               # site -> expiry time ("Allow once")
         # shared with the UI (guarded by _lock)
         self.page_events = queue.Queue(maxsize=300)   # play / pause / seeked / ended from the page's videos
@@ -271,6 +334,34 @@ class WebGuard:
 
     def navigate(self, url):
         self._cmds.put(("navigate", url))
+
+    YT_LEASE = 15.0                      # seconds the YouTube tab's switch stays on without the phone renewing it
+
+    def youtube_mode(self, on, go=None):
+        """The phone's YouTube tab is open (the phone renews this every few seconds; it lapses by itself): videos tapped
+        on youtube.com go to `on_youtube` instead of playing here, and YouTube is drawn black. `go` also opens that
+        page, after the theme is in place."""
+        self._cmds.put(("youtube", (bool(on), go)))
+
+    def _youtube(self, on, go, s):
+        def finish(cookies):
+            lease = time.time() + self.YT_LEASE if on else 1
+            self._send("Network.setCookie", {"name": "rl_yt", "value": "1", "domain": ".youtube.com", "path": "/",
+                                             "secure": True, "expires": lease}, s)
+            if cookies is not None:
+                self._send("Network.setCookie", {"name": "PREF", "value": dark_pref(cookies), "domain": ".youtube.com",
+                                                 "path": "/", "secure": True, "expires": time.time() + 400 * 86400}, s)
+            if go:
+                self._send("Page.navigate", {"url": go}, s)
+            elif cookies is not None and host_of(self._url).endswith("youtube.com"):
+                self._send("Page.reload", {}, s)              # already on YouTube: redraw it in the new theme
+
+        if on and (go or not self._yt_dark):
+            self._yt_dark = True
+            self._send("Network.getCookies", {"urls": ["https://www.youtube.com/"]}, s,
+                       cb=lambda r: finish(r.get("cookies", [])))
+        else:
+            finish(None)
 
     def back(self):
         self._cmds.put(("history", -1))
@@ -570,6 +661,8 @@ class WebGuard:
                 self._send(arg[0], arg[1], s)
             elif cmd == "navigate":
                 self._send("Page.navigate", {"url": arg}, s)
+            elif cmd == "youtube":
+                self._youtube(arg[0], arg[1], s)
             elif cmd == "reload":
                 self._send("Page.reload", {}, s)
             elif cmd == "eval":
@@ -602,7 +695,7 @@ class WebGuard:
         send("Page.enable")
         send("Network.enable")
         send("Runtime.enable")
-        for name in ("rlGesture", "rlVideo", "rlBlocked", "rlEvent"):
+        for name in ("rlGesture", "rlVideo", "rlBlocked", "rlEvent", "rlYoutube"):
             send("Runtime.addBinding", {"name": name})
         send("Page.addScriptToEvaluateOnNewDocument", {"source": PAGE_JS, "runImmediately": True})
         if not waiting:          # already-loaded page; a frame still frozen at start picks the script up on load
@@ -735,6 +828,10 @@ class WebGuard:
             self._last_gesture = time.time()
         elif name == "rlBlocked":
             self._blocked("overlays", "click-trap", "")
+        elif name == "rlYoutube":
+            url = str(p.get("payload", ""))[:2000]
+            if url.startswith("https://") and self.on_youtube:
+                self.on_youtube(url)
         elif name == "rlEvent":
             try:
                 ev = json.loads(p.get("payload", "{}"))

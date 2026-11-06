@@ -1572,6 +1572,9 @@ class PhoneBackend:
     def web_cast(self):
         return self.app.web.phone_cast()
 
+    def web_youtube(self, on, go):
+        self.app.web.phone_youtube(on, go)
+
     def web_transport(self, action, value):
         self.app.web.phone_transport(action, value)
 

@@ -111,6 +111,7 @@ class WebTab:
         self.subs = str(subs or "").strip().lower()
         self.upscaled = None                              # what the TV's upscaled cast was made with, while there is one
         self.guard = WebGuard(ui.log, home=self.home)
+        self.guard.on_youtube = self._youtube_tapped
         self.proc = None
         self.relay = None
         self.sync = None                                  # follows the page's video on the TV after a cast
@@ -230,6 +231,7 @@ class WebTab:
                 self.sync.stop(WebSync.BROWSER_GONE)
             self.guard.stop()
             self.guard = WebGuard(self.ui.log, home=self.home)         # fresh state for the new browser
+            self.guard.on_youtube = self._youtube_tapped
             self.view.reset()
             w, h = self.view.winfo_width(), self.view.winfo_height()
             self.guard.set_view(w if w > 50 else 1280, h if h > 50 else 700, self.visible)
@@ -709,6 +711,28 @@ class WebTab:
             g.navigate(target)
         else:
             raise ValueError("unknown action")
+
+    YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
+
+    def phone_youtube(self, on, go=""):
+        """The phone's YouTube tab: the real youtube.com in this browser, drawn black, where tapping a video plays it on
+        the TV (through Playlet) instead of here. The phone renews `on` every few seconds; `go` opens a page too."""
+        if go and (urlparse(go).scheme != "https" or (urlparse(go).hostname or "") not in self.YOUTUBE_HOSTS):
+            raise ValueError("That isn't a YouTube address.")
+        self.phone_open()
+        self.guard.youtube_mode(on, go or None)
+
+    def _youtube_tapped(self, url):
+        """A video was tapped on YouTube in the phone's tab (called from the browser thread): play it on the TV."""
+        def run():
+            try:
+                msg = self.app.phone.backend.cast(url)
+                self._post(lambda: self._note(msg, self.ui.GREEN, 6))
+            except Exception as e:
+                self.ui.log(f"youtube tap: {e!r}")
+                text = str(e) or "The TV didn't answer."
+                self._post(lambda: self._note(text, self.ui.AMBER, 8))
+        threading.Thread(target=run, name="youtube-tap", daemon=True).start()
 
     def phone_info(self):
         snap = self.guard.snapshot()
