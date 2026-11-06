@@ -10,7 +10,7 @@ if ($Clean) { Remove-Item -Recurse -Force build, dist, *.spec -ErrorAction Silen
 # PyInstaller logs to stderr; under Windows PowerShell 5.1 with "Stop" that counts as a failure, so relax it here
 $ErrorActionPreference = "Continue"
 python -m PyInstaller --noconfirm --onefile --noconsole --name CapoCast `
-    --icon assets\youtube.ico --add-data "assets;assets" roku_listen_gui.py
+    --icon assets\capocast.ico --add-data "assets;assets" roku_listen_gui.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 $ErrorActionPreference = "Stop"
 

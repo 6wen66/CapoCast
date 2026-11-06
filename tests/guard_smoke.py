@@ -153,6 +153,20 @@ def main():
         check("page video duration was learned", bool(d.best and 140 < d.best.duration < 160),
               str(d.best.duration if d.best else None))
 
+        # 7b. the thumbnail for Discord: the page's own preview image; none on a page that has neither
+        check("page_image finds the page's og:image", guard.page_image(3.0) == "https://thumbs.example/decoy-ep1.jpg",
+              repr(guard.page_image(3.0)))
+        info = guard.page_info(3.0)
+        check("page_info reads the live title and address", info.get("title", "").startswith("Decoy:")
+              and info.get("url", "").startswith("http://127.0.0.1"), repr(info))
+        guard.navigate(url + "page2" if url.endswith("/") else url + "/page2")
+        wait_for(lambda: guard.snapshot()["url"].endswith("/page2"), 8)
+        time.sleep(1.0)
+        check("page_image is empty when the page has no picture", guard.page_image(3.0) == "", repr(guard.page_image(3.0)))
+        guard.navigate(url)
+        wait_for(lambda: guard.snapshot()["url"] == url, 8)
+        time.sleep(1.0)
+
         # 8. a script redirect with no click is stopped
         guard.navigate(url + "?bounce=1")
         time.sleep(6)

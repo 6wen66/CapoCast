@@ -58,6 +58,8 @@ To build the standalone `.exe`:
 | `stream_finder.py` | Chooses the real video among decoys. Pure logic, no I/O |
 | `media_relay.py` | LAN server that relays a stream to the Roku with the site's headers and rewrites HLS / DASH manifests |
 | `brave_profile.py` | The Web tab's private Brave profile and its launch flags; copies Brave's ad filters into it |
+| `tv_apps.py` | The quick app row: parses the Roku's app list and handles pinning. Pure logic, unit tested |
+| `discord_presence.py` | The optional Discord status: one connection shared by the Web and YouTube tabs, thumbnails, update spacing |
 | `drm.py` | DRM refusal (by site and by HLS key). Keep it: the project doesn't cast DRM content |
 | `tests/` | Unit tests, the hostile test site (`decoy_site.py`) and three end-to-end checks (see below) |
 | `extension/` | Chrome extension: Playlet cast button and the auto-cast content script (`feed.js`) |
@@ -102,6 +104,8 @@ The UI and the Roku-facing code have no automated tests, so before opening a PR 
 - [ ] **YouTube tab:** Chrome embeds, resizes with the window, and closes with the app.
 - [ ] **Auto-cast:** picking a video plays it on the TV; pause, scrub, and going back to Home all mirror correctly.
 - [ ] **Web tab:** Brave embeds and resizes with the window; on a real video page Cast plays on the TV (check the Windows Firewall prompt on a first run); pause and ±10 s work from the Listen tab; going Web → YouTube → Web keeps both working.
+- [ ] **Discord:** with a tab's toggle on and Discord open, a cast (Web) or video (YouTube) shows as your status with its title and thumbnail, and ending it clears it; off sends nothing. The two tabs' switches are separate.
+- [ ] **Listen tab:** the Output menu switches the sound device while connected; the Apps tiles open Playlet, and the All apps list opens, filters and pins.
 - [ ] **Upscale:** with it on, a cast plays on the TV with picture and sound in sync; ±10 s on the remote and scrubbing on the page both land in the right place; Stop casting ends the `ffmpeg` process.
 - [ ] No errors in `%APPDATA%\RokuListen.log`.
 

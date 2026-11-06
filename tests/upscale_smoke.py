@@ -58,6 +58,12 @@ def make_clip(folder):
                     os.path.join(folder, "clip.m3u8")], check=True, creationflags=NO_WINDOW)
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.join(folder, "clip.m3u8"), "-c", "copy",
                     "-movflags", "+faststart", os.path.join(folder, "clip.mp4")], check=True, creationflags=NO_WINDOW)
+    # audio that begins after the picture, as a real site's did
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=16",
+                    "-itsoffset", "1.6", "-f", "lavfi", "-i", "sine=f=440:d=16", "-map", "0:v", "-map", "1:a",
+                    "-c:v", "libx264", "-g", "48", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-f", "hls",
+                    "-hls_time", "4", "-hls_playlist_type", "vod", os.path.join(folder, "late.m3u8")], check=True,
+                   creationflags=NO_WINDOW)
     # the way many anime sites serve it: AES-128, with the segments dressed up as pictures
     with open(os.path.join(folder, "k.bin"), "wb") as f:
         f.write(bytes(range(16)))
@@ -169,6 +175,13 @@ def main():
         t, facts = look(fetch(url.replace("index.m3u8", "v_init.mp4")), fetch(url.replace("index.m3u8", "v00001.m4s")),
                         work, "f1.mp4")
         check("and makes the same 4K stream", "3840" in facts and t is not None and abs(t - 4) < 0.1, f"{facts} {t}")
+
+        url = relay.add_upscaled(source.replace("clip", "late"), {"Referer": REFERER}, "hls", 0, 16, "fast", True)
+        late = relay.session_for(url)
+        late.wait_ready()
+        t, _ = look(fetch(url.replace("index.m3u8", "a_init.mp4")), fetch(url.replace("index.m3u8", "a00001.m4s")),
+                    work, "l1.mp4")
+        check("audio that starts late stays on the playlist's timeline", t is not None and abs(t - 4) < 0.1, t)
 
         locked = source.replace("clip", "locked")
         info = upscaler.probe(locked, {"Referer": REFERER}, "hls")

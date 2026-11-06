@@ -74,6 +74,9 @@ class Command(unittest.TestCase):
         self.assertIn("-allowed_extensions", self.build("hls"))
         self.assertNotIn("-allowed_extensions", self.build("mp4"))    # FFmpeg refuses an option the demuxer lacks
 
+    def test_audio_is_pinned_to_the_playlists_timeline(self):
+        self.assertIn("first_pts=0", self.value(self.build(), "-af"))
+
     def test_no_audio_output_for_a_silent_video(self):
         cmd = self.build(audio=False)
         self.assertNotIn("a.m3u8", cmd)
@@ -390,7 +393,8 @@ class Pace(Fixture):
         s.log = lines.append
         for _ in range(upscaler.SENT_EVERY):
             s.sent(8_000_000, 2.0)
-        self.assertEqual(lines, ["upscale: stream needs 16.0 Mbit/s, TV took it at 32.0 Mbit/s"])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("stream needs 16.0 Mbit/s, TV took it at 32.0 Mbit/s, waited 0.0s for 8 pieces", lines[0])
 
 
 class Relay(Fixture):

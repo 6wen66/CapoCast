@@ -18,10 +18,11 @@ import subprocess
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 from urllib.parse import urlparse
 
 import brave_profile
+import discord_presence
 import drm
 import upscaler
 from media_relay import MediaRelay, probe_all
@@ -91,8 +92,16 @@ class Tv:
 
 
 class WebTab:
-    def __init__(self, app, page, ui, home=None, upscale=None):
+    discord, cast_since = None, 0.0                       # defaults for anything built without __init__
+    upscale_owner, tv_gone, cast_image, cast_session = None, 0, None, None
+    cast_site = ""                                           # the site being cast from, for the Discord status
+
+    SOURCE = "web"                                        # this tab's name in the shared Discord status
+
+    def __init__(self, app, page, ui, home=None, upscale=None, discord=None):
         self.app, self.page, self.ui = app, page, ui
+        self.discord = discord                            # discord_presence.Status, shared with the YouTube tab
+        self.cast_since = 0.0                             # when the current cast began, for Discord's timer
         self.home = home or HOME
         self.upscale = upscale if upscale in UPSCALE_NAMES else "off"
         self.upscaled = None                              # what the TV's upscaled cast was made with, while there is one
@@ -110,6 +119,10 @@ class WebTab:
         self.note, self.note_until = ("", ui.MUTED), 0.0
         self._build()
         app.after(250, self._tick)
+
+    @property
+    def discord_on(self):
+        return bool(self.discord and self.discord.is_on(self.SOURCE))
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -149,6 +162,10 @@ class WebTab:
         self.upscale_lbl.pack(side="right", padx=(0, 12))
         self.upscale_lbl.bind("<Button-1>", lambda e: self.next_upscale())
         self._paint_upscale()
+        self.discord_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
+        self.discord_lbl.pack(side="right", padx=(0, 12))
+        self.discord_lbl.bind("<Button-1>", lambda e: self.toggle_discord())
+        self._paint_discord()
         self.stop_lbl = tk.Label(strip, text="Stop casting", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"),
                                  cursor="hand2")
         self.stop_lbl.bind("<Button-1>", lambda e: self.stop_casting())
@@ -200,6 +217,8 @@ class WebTab:
                 os.remove(brave_profile.port_file(self.profile))
             except OSError:
                 pass
+            if self.sync and self.sync.active:
+                self.sync.stop(WebSync.BROWSER_GONE)
             self.guard.stop()
             self.guard = WebGuard(self.ui.log, home=self.home)         # fresh state for the new browser
             self.view.reset()
@@ -216,6 +235,8 @@ class WebTab:
         try:
             if self.proc is not None and self.proc.poll() is not None:
                 self.proc = None
+                if self.sync and self.sync.active:
+                    self.sync.stop(WebSync.BROWSER_GONE)       # nothing can report the page's video any more
                 self.guard.stop()
                 self._message("The browser stopped  ·  click to reopen", clickable=True)
             if self.alive():
@@ -295,6 +316,51 @@ class WebTab:
         on = self.upscale != "off"
         self.upscale_lbl.config(text="Upscale: " + UPSCALE_NAMES[self.upscale], fg=self.ui.ACCENT if on else self.ui.MUTED)
 
+    def _paint_discord(self):
+        self.discord_lbl.config(text="Discord: " + ("On" if self.discord_on else "Off"),
+                                fg=self.ui.ACCENT if self.discord_on else self.ui.MUTED)
+
+    def toggle_discord(self):
+        """Show what's on the TV as your Discord status. Off until you turn it on, and asks for the application ID
+        the first time: Discord only shows a status for an application you've registered."""
+        if self.discord is None:
+            return
+        if self.discord.enabled.get(self.SOURCE):
+            self.discord.enable(self.SOURCE, False)
+        else:
+            if not self.discord.client_id:
+                found, problem = discord_presence.ask_application_id(self.app)
+                if problem:
+                    return self._note(problem, self.ui.AMBER, 10)
+                if not found:
+                    return
+                self.discord.set_id(found)
+            self.discord.enable(self.SOURCE, True)
+            if not discord_presence.discord_running():
+                self._note("Discord isn't open. The status will appear once it is.", self.ui.AMBER, 8)
+            if self.sync is not None and self.sync.active:       # already casting: show it now, Discord open or not
+                self._set_presence(self.sync.title or "Watching", self.cast_image, self.cast_site)
+        self._paint_discord()
+        save = getattr(self.app, "_save", None)
+        if save:
+            save()
+
+    def _set_presence(self, title, image=None, site=""):
+        """Show `title` as the Discord status, laid out like the YouTube one: the name of what's playing, the site it's
+        on (and the upscaling, if any) underneath, and its thumbnail beside them. None takes the status down. Does
+        nothing when it's off."""
+        if self.discord is None:
+            return
+        if title is None:
+            self.discord.clear(self.SOURCE)
+            return
+        mode = (self.upscaled or {}).get("mode")
+        state = f"on {site}" if site else "Casting to the TV"
+        if mode:
+            state += f" · 4K upscale ({UPSCALE_NAMES[mode]})"
+        self.discord.show(self.SOURCE, title, state, self.cast_since or None, image,
+                          image_text=f"{title} · {site}" if site else title)
+
     def next_upscale(self):
         """Clicking the label steps through Off, Anime4K, Anime4K HQ and Movie. It applies from the next cast."""
         names = list(UPSCALE_NAMES)
@@ -327,12 +393,34 @@ class WebTab:
     def _following_stopped(self, reason):
         """Called from WebSync's thread when it gives up (page left, TV stopped, or you pressed Stop)."""
         self._post(self.next.grace if reason in (WebSync.LEFT_PAGE, WebSync.FINISHED) else self.next.disarm)
+        if reason in ("Stopped", WebSync.FINISHED, WebSync.TV_STOPPED):
+            self._set_presence(None)                      # leaving the page doesn't count: the TV is still playing it
         if self.relay and reason in ("Stopped", WebSync.FINISHED, WebSync.TV_STOPPED):
+            self.upscaled = None
             self.relay.stop_upscaling()                   # leaving the page doesn't count: the TV is still playing it
         if reason and reason != "Stopped":
             self._post(lambda: self._note(reason, self.ui.AMBER, 12))
         elif reason == "Stopped":
             self._post(lambda: self._note("Stopped casting", self.ui.MUTED, 6))
+
+    def tv_state(self, st):
+        """Fed by the app's once-a-second look at the TV (None if it can't be reached). WebSync notices the TV leaving
+        while the page is being followed; this covers the rest: you left the page, or a recast failed, and the TV has
+        since gone somewhere else. Then the Discord status comes down and the encoder stops, rather than both carrying
+        on for a cast nobody is watching."""
+        left_over = bool(self.upscaled or (self.discord and self.discord.showing == self.SOURCE))
+        following = self.sync is not None and self.sync.active
+        if st is None or following or self.busy or not left_over:
+            self.tv_gone = 0
+            return
+        on_cast = st["state"] != "none" and st.get("app") in ("RokuCast", "")
+        self.tv_gone = 0 if on_cast else self.tv_gone + 1
+        if self.tv_gone < 2:                              # one odd reading while the TV switches isn't enough
+            return
+        self.tv_gone, self.upscaled = 0, None
+        self._set_presence(None)
+        if self.relay:
+            threading.Thread(target=self.relay.stop_upscaling, daemon=True).start()
 
     def go_home(self):
         self.guard.navigate(self.home)
@@ -525,7 +613,18 @@ class WebTab:
         return self.relay
 
     def _send(self, attempt, cand, title):
-        """Worker thread: hand the stream to the relay, tell the Roku to play it, and confirm it arrived."""
+        """Worker thread: hand the stream to the relay, tell the Roku to play it, and confirm it arrived. If the cast
+        fails or is cancelled after the encoder started, the encoder stops too: left alone it would keep the GPU busy
+        until it was minutes ahead of a TV that never got the stream."""
+        try:
+            self._send_cast(attempt, cand, title)
+        except BaseException:
+            if self.relay and getattr(self, "upscale_owner", None) == attempt:
+                self.upscale_owner, self.upscaled = None, None
+                self.relay.stop_upscaling()
+            raise
+
+    def _send_cast(self, attempt, cand, title):
         self._check(attempt)
         ui, host = self.ui, self.app._host
         relay = self._ensure_relay(host)
@@ -555,14 +654,28 @@ class WebTab:
         except Cancelled:
             self._tv_back()                           # the TV had already been told to play this
             raise
-        label = title or urlparse(cand.url).hostname or "video"
+        label, self.cast_site, self.cast_image = self._describe(title, cand)
         # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
         if self.sync is None:
             self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
+        self.sync.guard = self.guard                  # Brave may have been restarted since the last cast
         self.sync.start(cand, offset=sess.actual_start or 0.0, page_time=page_t, title=label,
                         restartable=bool(self.upscaled))
         self._post(lambda: self._cast_done(attempt, label))
-        self._watch_health(sess)
+        self._watch_health(attempt, sess)
+
+    def _describe(self, title, cand):
+        """(name, site, thumbnail) for what's now on the TV. The page's live title is used if it is still the page that
+        was cast from (a single-page site changes it as you move between episodes); the title seen when Cast was
+        pressed otherwise."""
+        info = self.guard.page_info(2.0)
+        defrag = lambda u: urlparse(u or "")._replace(fragment="").geturl()
+        same = not info or defrag(info.get("url")) == defrag(self.cast_page)
+        live = (info.get("title") or info.get("og_title") or "").strip() if info and same else ""
+        site = discord_presence.site_label(self.cast_page, info.get("site", "") if info and same else "")
+        name = discord_presence.clean_title(live or title, site, self.cast_page)
+        image = self.guard.page_image(2.0, cand.duration) if same else ""
+        return name or urlparse(cand.url).hostname or "video", site, image
 
     def _upscale_plan(self, cand):
         """Whether this cast can be upscaled: {'mode', 'duration', 'audio'}, or None to cast it as it is (saying why,
@@ -595,6 +708,7 @@ class WebTab:
         """Start the encoder and wait for its first piece. Returns the URL for the TV, or None to cast plainly."""
         ui = self.ui
         self._post(lambda: self._note(f"Upscaling ({UPSCALE_NAMES[plan['mode']]})…", ui.AMBER, 60))
+        self.upscale_owner = attempt                      # so a failure of this attempt (and only this one) stops it
         url = relay.add_upscaled(cand.url, cand.headers, cand.kind, start, plan["duration"], plan["mode"], plan["audio"])
         sess = relay.session_for(url)
         try:
@@ -644,29 +758,39 @@ class WebTab:
             time.sleep(0.25)
         time.sleep(0.6)
 
-    def _watch_health(self, sess):
-        """For half a minute after a cast, notice if the stream is quietly failing (segments refused or expired),
-        which is how a cast ends up silent or frozen part-way."""
-        end = time.time() + 30
-        while time.time() < end and self.sync is not None and self.sync.active:
-            time.sleep(2)
-            if len(sess.failures) >= 3:
-                codes = sorted({c for c, _ in sess.failures})
-                self.ui.log(f"stream failing: {sess.failures[:6]}")
+    FAIL_WINDOW, FAIL_LIMIT = 30.0, 3        # this many failed requests within this many seconds is a stream going bad
+
+    def _watch_health(self, attempt, sess, tick=2.0):
+        """For as long as this cast is followed, notice if the stream is quietly failing (segments refused or
+        expired, which is how a cast ends up silent or frozen part-way), if the upscaler dies, or if it can't keep up.
+        A seek moves the cast to a new session, which is followed too."""
+        self.cast_session = sess
+        current, seen, fails, warned_at, slow = sess, 0, [], 0.0, False
+        while self.sync is not None and self.sync.active and attempt == self.attempt:
+            time.sleep(tick)
+            sess = self.cast_session or sess
+            if sess is not current:                           # a scrub restarted the stream
+                current, seen, fails, slow = sess, 0, [], False
+            now = time.time()
+            fresh = list(sess.failures[seen:])
+            seen += len(fresh)
+            fails = [(t, c) for t, c in fails if now - t < self.FAIL_WINDOW] + [(now, c) for c, _ in fresh]
+            if len(fails) >= self.FAIL_LIMIT and now - warned_at > 60:
+                warned_at = now
+                codes = sorted({c for _, c in fails})
+                self.ui.log(f"stream failing: {sess.failures[-6:]}")
                 self._post(lambda: self._note(
                     "Parts of this stream are failing to load" + (f" (HTTP {codes[0]})" if codes[0] else "")
                     + ". Reload the page and Cast again.", self.ui.AMBER, 20))
-                return
-        warned = False
-        while not warned and self.sync is not None and self.sync.active:
-            plan = self.upscaled
-            if not plan:
-                return
-            time.sleep(2)
-            warned = plan["session"].stalls >= 3          # a seek swaps the session in the plan, so this follows it
-        if warned:
-            self._post(lambda: self._note("Upscaling is running slower than the video, so the TV may buffer. The site "
-                                          "may be slow, or the GPU busy: try a lighter Upscale setting.", self.ui.AMBER, 20))
+            elif sess.error and now - warned_at > 60 and sess.error != getattr(self, "_reported_error", ""):
+                warned_at, self._reported_error = now, sess.error
+                reason = sess.error
+                self._post(lambda: self._note("The stream stopped: " + reason, self.ui.AMBER, 20))
+            if not slow and getattr(sess, "stalls", 0) >= 3 and self.upscaled:
+                slow = True                                   # a seek swaps the session in the plan, so this follows it
+                self._post(lambda: self._note("Upscaling is running slower than the video, so the TV may buffer. The "
+                                              "site may be slow, or the GPU busy: try a lighter Upscale setting.",
+                                              self.ui.AMBER, 20))
 
     def _relay_add(self, url, headers, kind, start):
         relay = self._ensure_relay(self.app._host)
@@ -676,12 +800,15 @@ class WebTab:
             plan["session"] = relay.session_for(public)
         else:
             public = relay.add(url, headers, kind, start)
-        return public, relay.session_for(public)
+        self.cast_session = relay.session_for(public)
+        return public, self.cast_session
 
     def _cast_done(self, attempt, label):
         if attempt != self.attempt:
             return
         self.busy = False
+        self.cast_since = time.time()
+        self._set_presence(label, self.cast_image, self.cast_site)
         self.next.arm(self.cast_page)
         self._note("On TV  ·  " + (label if len(label) <= 52 else label[:51] + "…") + "  ·  following this page",
                    self.ui.GREEN, 20)

@@ -24,8 +24,8 @@ SEGMENT = 4             # seconds per piece; Roku recommends 4-6
 TARGET_W, TARGET_H = 3840, 2160
 MAX_BITRATE = 16_000_000
 AUDIO_BITRATE = 192_000
-READ_RATE, BURST = 1.5, 20      # read the source a little faster than real time after a 20 s head start: enough to
-                                # build the TV a buffer, while the GPU load stays level, which matters during a game
+READ_RATE, BURST = 2.0, 60      # a 60 s head start, then twice real time. The TV plays smoothly once the encoder is
+                                # well ahead of it, so get there fast; an RTX 5060 manages 2.3x on HQ at 1080p
 AHEAD = 75              # pieces (5 min) to stay ahead of the TV. A paused or departed TV stops the encoder here...
 REFILL = 15             # ...and it starts again when the TV is this close to the end of what's been made
 KEEP_BEHIND = 8         # pieces kept behind the TV, for a short jump back
@@ -131,7 +131,10 @@ def command(exe, url, headers, kind, first, audio):
            "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT})", "-forced-idr", "1", "-tag:v", "hvc1",
            "-output_ts_offset", str(begin), *_hls_output("v", first)]
     if audio:
-        cmd += ["-vn", "-sn", "-dn", "-c:a", "aac", "-ac", "2", "-b:a", str(AUDIO_BITRATE),
+        # first_pts: a source's audio can begin after its picture, and pieces are cut from the first audio packet, so
+        # without silence to fill that gap every audio piece would sit that far from where the playlist says it is
+        cmd += ["-vn", "-sn", "-dn", "-af", "aresample=async=1:first_pts=0",
+                "-c:a", "aac", "-ac", "2", "-b:a", str(AUDIO_BITRATE),
                 "-output_ts_offset", str(begin), *_hls_output("a", first)]
     return cmd
 
@@ -188,6 +191,7 @@ class UpscaleSession:
         self.stalls, self.closed = 0, False     # stalls: pieces in a row made slower than real time, while they're needed
         self._pace = None                       # (piece the encoder had reached, when)
         self._sent = [0, 0, 0.0]                # pieces, bytes, seconds
+        self._waited = 0.0                      # seconds video requests have spent waiting for the encoder
         self.total = max(1, math.ceil(self.duration / SEGMENT))
         self.first = min(int(self.start // SEGMENT), self.total - 1)
         self.last = self.first                  # the latest piece the TV asked for
@@ -230,6 +234,8 @@ class UpscaleSession:
             while True:
                 path = self._find(name)
                 if path:
+                    if m and m.group(1) == "v":
+                        self._waited += time.time() - began
                     return path
                 left = began + timeout - time.time()
                 if self.closed or self.error or left <= 0:
@@ -260,8 +266,9 @@ class UpscaleSession:
             if total[0] >= SENT_EVERY:
                 need = total[1] * 8 / (total[0] * SEGMENT) / 1e6
                 got = total[1] * 8 / max(total[2], 0.001) / 1e6
-                self.log(f"upscale: stream needs {need:.1f} Mbit/s, TV took it at {got:.1f} Mbit/s")
-                self._sent = [0, 0, 0.0]
+                self.log(f"upscale: stream needs {need:.1f} Mbit/s, TV took it at {got:.1f} Mbit/s, "
+                         f"waited {self._waited:.1f}s for {total[0]} pieces, encoder {self._frontier() - self.last} ahead")
+                self._sent, self._waited = [0, 0, 0.0], 0.0
 
     def close(self):
         with self._cond:
