@@ -70,7 +70,7 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | ✨ **4K upscaling for the TV** | Your PC sharpens Web tab casts to 4K as they play, with Anime4K for anime or FSRCNNX for live action, and the TV just plays the result (needs an NVIDIA GPU) |
 | 🚀 **Quick apps** | Tiles under the remote that open an app on the TV in one click. Playlet is there from the start; **All apps** lists everything on your Roku, and you can pin up to five |
 | 🔈 **Choose where the sound goes** | An **Output** menu on the Listen tab picks the PC's sound device, and it switches while connected. If the device disappears, CapoCast keeps trying for 30 s before giving up |
-| 📱 **Phone remote** | Control everything from your phone: an iPhone home-screen web app (free, no app store or signing) with the d-pad, playback, volume, typing on the TV, and the Roku's apps. Scan the QR code once; it works from then on |
+| 📱 **Phone remote** | Control everything from your phone: an iPhone home-screen web app (free, no app store or signing) with the d-pad, playback, volume, typing on the TV, the Roku's apps, and your YouTube feed and Playlet settings. Scan the QR code once; it works from then on |
 | 🧭 **Phone browser** | Browse the Web tab from your phone (tap, scroll, type, address bar) and press **Cast this page**. Bookmarks and history live on your PC, a "Watching" banner follows what the PC is casting, and play/pause and a scrub bar keep the page, the TV and Discord together |
 | 🔗 **Share-menu cast** | One-time iOS Shortcut so **Cast to TV** appears in the Share menu of Safari, YouTube and most apps. YouTube links go to Playlet, other sites cast through the Web tab |
 | 💬 **Subtitles on the TV** | Pick a subtitle language in the Web tab and the PC burns it into the upscaled cast (needs an NVIDIA GPU) |
@@ -256,6 +256,7 @@ Control the TV from an iPhone (or any phone) on the same Wi-Fi, with no app stor
 - **Follows your PC:** while the TV is following a page, every tab shows a "Watching" banner. When a cast starts on the PC (or you open the phone app mid-cast) the phone jumps to Browse on that page; the **Auto-open** switch in the banner turns this off. While casting, the Remote tab's play/pause and skip buttons also go through the page, so everything stays in sync.
 - **Cast:** paste a link. YouTube links go straight to Playlet on the TV; any other site is opened in the Web tab's ad-blocking browser on the PC and cast from there (so CapoCast must be running, and the video has to start by itself).
 - **Apps:** the Roku's apps, with their icons.
+- **YouTube:** Playlet's own web app inside the phone app: your home feed (subscriptions, recommended), search, playlists and every Playlet setting, with a button on each video to play it on the TV. The Roku serves it directly to the phone (port 8888), and only while Playlet is open on the TV, so if it isn't, the tab offers **Open Playlet on the TV** and shows the feed as soon as it's up. ⌂ goes back to Playlet's home page. The bar says which account Playlet is signed in as. That is the Roku's Playlet profile, shared with the TV: to use another account, add it in the tab under Playlet's Settings → Profiles and switch to it there (it switches on the TV too).
 
 Anyone holding the link can browse as your PC's Web tab (it is the same browser and profile), so treat the link like a password. It is off until you turn it on. Only devices on a private network can reach it, every request needs the secret in the link (use **Make a new link** to cut off old phones), and the phone can't send power keys. Windows may ask once to allow CapoCast on private networks. The link is plain HTTP on your home network, like the Roku's own remote protocol.
 
@@ -304,7 +305,7 @@ roku-listen/
 ├── media_relay.py         # serves a stream to the Roku with the site's headers; HLS rewriting
 ├── tv_apps.py             # the quick app row: the Roku's app list and pinning (pure logic)
 ├── phone_store.py         # bookmarks and history for the phone's Browse tab (a small JSON file)
-├── phone_remote.py        # phone remote: tiny LAN web server + the home-screen web app it serves (remote, browser, cast, apps)
+├── phone_remote.py        # phone remote: tiny LAN web server + the home-screen web app it serves (remote, browser, YouTube/Playlet, cast, apps)
 ├── discord_presence.py    # optional Discord status for what's on the TV (Web and YouTube)
 ├── upscaler.py            # 4K upscaling and subtitle burn-in on the PC's GPU, for the Web tab's casts
 ├── subtitles.py           # finds a page's subtitle tracks and turns the chosen one into styled ASS

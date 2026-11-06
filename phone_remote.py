@@ -244,6 +244,8 @@ class PhoneRemote:
                 return 200, b.state(), "application/json"
             if path == "/api/apps":
                 return 200, {"apps": b.apps()}, "application/json"
+            if path == "/api/playlet":
+                return 200, b.playlet(), "application/json"
             if path.startswith("/api/icon/"):
                 png = b.icon(urllib.parse.unquote(path[len("/api/icon/"):]))
                 return 200, png, "image/png"
@@ -549,6 +551,16 @@ body.browsing header{display:none}
 #bact #kbd,#bact #star,#bact #pages{flex:0 0 52px;font-size:19px}
 #bact{display:flex;gap:8px;padding:8px}
 #bact button{min-height:46px}
+#t-yt.on{display:flex;flex-direction:column;height:calc(100vh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top));
+  height:calc(100dvh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top))}
+#ytbar{display:flex;gap:8px;align-items:center;padding:8px 10px;font-size:14px;color:var(--muted)}
+#ytbar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ytbar button{flex:0 0 44px;min-height:40px;font-size:20px;border-radius:12px;padding:0}
+#ytview{position:relative;flex:1;min-height:0;background:#000}
+#ytframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#0f0f0f}
+#ytmsg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
+  padding:30px;color:var(--muted);font-size:14px;line-height:1.5}
+#ytmsg button{flex:0 0 auto;min-width:200px;padding:0 20px}
 </style></head><body>
 <div id="gone"><h2 style="color:var(--fg)">Open this from CapoCast</h2>
 On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with your phone's camera. This page needs the link it shows.</div>
@@ -590,6 +602,12 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
   <div id="bact"><button id="kbd" aria-label="Keyboard">⌨</button><button id="star" aria-label="Bookmark this page">☆</button><button id="pages" aria-label="Bookmarks and history">☰</button><button id="bcast" class="go">Cast this page</button></div>
 </section>
 
+<section class="tab" id="t-yt">
+  <div id="ytbar"><span id="ytwho">Playlet · your YouTube feed and settings</span><button id="ythome" aria-label="Back to Playlet's home">⌂</button></div>
+  <div id="ytview"><iframe id="ytframe" title="Playlet" allow="clipboard-write"></iframe>
+    <div id="ytmsg"><div id="ytmsgtext">Looking for Playlet on the TV…</div><button class="go" id="ytopen" style="display:none">Open Playlet on the TV</button></div></div>
+</section>
+
 <section class="tab" id="t-cast">
   <label for="link">Link to play on the TV</label>
   <input id="link" type="url" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste a video or page link">
@@ -606,7 +624,7 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
 </div>
 <div id="sheet"><div class="sh"><div class="shh"><button data-pg="bookmarks" class="on">Bookmarks</button><button data-pg="history">History</button><button id="shclose" aria-label="Close">✕</button></div>
   <div id="shlist"></div><button class="small" id="shclear" style="display:none;margin-top:8px;flex:0 0 auto">Clear history</button></div></div>
-<nav id="nav"><button data-tab="remote" class="on"><b>◉</b>Remote</button><button data-tab="browse"><b>◍</b>Browse</button><button data-tab="cast"><b>⇪</b>Cast</button><button data-tab="apps"><b>▦</b>Apps</button></nav>
+<nav id="nav"><button data-tab="remote" class="on"><b>◉</b>Remote</button><button data-tab="browse"><b>◍</b>Browse</button><button data-tab="yt"><b>▶</b>YouTube</button><button data-tab="cast"><b>⇪</b>Cast</button><button data-tab="apps"><b>▦</b>Apps</button></nav>
 <script>
 "use strict";
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -713,10 +731,44 @@ $("#stopcast").onclick=async()=>{ const d=await act("/api/stop",{}); if(d) note(
 $$("#nav button").forEach(b=>b.onclick=()=>{
   $$("#nav button").forEach(x=>x.classList.toggle("on",x===b));
   $$(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+b.dataset.tab));
-  document.body.classList.toggle("browsing",b.dataset.tab==="browse");
+  document.body.classList.toggle("browsing",b.dataset.tab==="browse"||b.dataset.tab==="yt");
   if(b.dataset.tab==="apps") loadApps();
   browse(b.dataset.tab==="browse");
+  ytShow(b.dataset.tab==="yt");
 });
+
+// ---- YouTube: Playlet's own web app (your feed, search and every setting). The Roku serves it, on its own, while Playlet is
+// open on the TV, so this tab only has to find it, open Playlet if it isn't, and show it.
+const ytf=$("#ytframe");
+let ytOn=false, ytRun=0, ytLoaded=false, ytDown=false, ytBase="";
+function ytMsg(text,button){ $("#ytmsg").style.display=text?"flex":"none"; $("#ytmsgtext").textContent=text||""; $("#ytopen").style.display=button?"block":"none"; }
+function ytShow(on){ ytOn=on; ytRun++; if(on) ytLoop(ytRun); }
+async function ytLoop(id){
+  while(ytOn&&id===ytRun){
+    let p;
+    try{ p=await api("/api/playlet"); }
+    catch(e){ ytMsg(e.message,false); await sleep(2500); continue; }
+    if(!ytOn||id!==ytRun) return;
+    if(p.up){
+      ytBase=p.url;
+      $("#ytwho").textContent="Playlet"+(p.account?" · signed in as "+p.account:"");
+      if(!ytLoaded||ytDown){ ytf.src=ytBase; ytLoaded=true; ytDown=false; }
+      ytf.style.display="block"; ytMsg("");
+      return;                                        // it stays open while you use it; switching back here checks again
+    }
+    if(ytLoaded) ytDown=true;                        // Playlet was closed on the TV: reload it once it is back
+    ytf.style.display="none";
+    ytMsg("Playlet isn't open on the TV. It has to be open for its feed to show here.",true);
+    $("#ytopen").dataset.id=p.id||"";
+    await sleep(2000);
+  }
+}
+$("#ytopen").onclick=async()=>{
+  const id=$("#ytopen").dataset.id; if(!id) return;
+  ytMsg("Opening Playlet on the TV…",false);
+  await act("/api/launch",{id});
+};
+$("#ythome").onclick=()=>{ if(ytBase&&ytLoaded) ytf.src=ytBase; else ytShow(true); };
 
 // ---- Browse: the PC's browser as a live picture. Taps, drags and typing go back to it.
 const view=$("#view"), shot=$("#shot");

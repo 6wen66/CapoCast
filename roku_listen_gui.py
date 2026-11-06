@@ -1520,6 +1520,20 @@ class PhoneBackend:
             self._apps, self._apps_at = Remote.apps(self.app._host), time.time()
         return self._apps
 
+    def playlet(self):
+        """Where the phone's YouTube tab finds Playlet's web app, and whether the Roku is serving it right now (it only
+        does while Playlet is open on the TV). The phone loads it straight from the Roku, so its address is the Roku's."""
+        host = self.app._host
+        up, account = False, ""
+        try:
+            data = json.loads(Remote._open(f"http://{host}:8888/api/profiles", timeout=1.5))
+            up = True
+            now = next((p for p in data.get("profiles", []) if p.get("id") == data.get("currentProfile")), {})
+            account = now.get("username") or ""        # whose feed Playlet is showing (it is the TV's profile too)
+        except Exception:
+            pass
+        return {"up": up, "url": f"http://{host}:8888/", "id": PLAYLET_ID, "account": account}
+
     def icon(self, app_id):
         if app_id not in self._icons:
             self._icons[app_id] = Remote.icon(self.app._host, app_id)
