@@ -311,8 +311,9 @@ class Wiring(unittest.TestCase):
         t._set_presence("Frieren", "https://a.b/c.jpg")
         t.upscaled = {"mode": "movie"}
         t._set_presence("Heat")
-        self.assertEqual(self.calls, [("show", "web", "Frieren", "Casting to the TV", "https://a.b/c.jpg", "Frieren"),
-                                      ("show", "web", "Heat", "Casting to the TV · 4K upscale (Movie)", None, "Heat")])
+        self.assertEqual(self.calls, [("show", "web", "Watching Frieren", "Casting to the TV", "https://a.b/c.jpg", "Frieren"),
+                                      ("show", "web", "Watching Heat", "Casting to the TV · 4K upscale (Movie)", None,
+                                       "Heat")])
 
     def test_the_site_is_named_under_the_title(self):
         t = self.tab(True)
@@ -320,8 +321,15 @@ class Wiring(unittest.TestCase):
         t.upscaled = {"mode": "movie"}
         t._set_presence("Heat", None, "FMovies")
         self.assertEqual(self.calls, [
-            ("show", "web", "Frieren Episode 5", "on Miruro", "https://a.b/c.jpg", "Frieren Episode 5 · Miruro"),
-            ("show", "web", "Heat", "on FMovies · 4K upscale (Movie)", None, "Heat · FMovies")])
+            ("show", "web", "Watching Frieren Episode 5", "on Miruro", "https://a.b/c.jpg", "Frieren Episode 5 · Miruro"),
+            ("show", "web", "Watching Heat", "on FMovies · 4K upscale (Movie)", None, "Heat · FMovies")])
+
+    def test_the_upscale_mode_is_named_once(self):
+        t = self.tab(True)
+        t.upscaled = {"mode": "hq"}
+        t._set_presence("Ghost in the Shell", None, "Miruro")
+        self.assertEqual(self.calls[0][3], "on Miruro · Anime4K HQ upscale")
+        self.assertEqual(self.calls[0][3].count("4K"), 1)
 
     def test_none_takes_only_the_web_status_down(self):
         t = self.tab(True)
@@ -360,9 +368,62 @@ class PageTitles(unittest.TestCase):
         self.assertEqual(dp.site_label("https://miruro.cx/", "Miruro - Watch anime online free in HD"), "Miruro")
         self.assertEqual(dp.site_label("https://localhost:8080/"), "")
 
+    def test_a_leading_watch_goes_when_the_site_follows_it(self):
+        self.assertEqual(dp.clean_title("Watch Ghost in the Shell - Miruro", "Miruro", "https://miruro.cx/w"),
+                         "Ghost in the Shell")
+
     def test_a_logo_is_not_a_thumbnail(self):
         self.assertTrue(dp.looks_like_logo("https://cdn.example/img/logo-1200.png"))
         self.assertFalse(dp.looks_like_logo("https://cdn.example/thumbs/ep5.jpg"))
+
+
+class Thumbnails(unittest.TestCase):
+    def probe(self, sizes):
+        return lambda url: sizes.get(url)
+
+    def test_the_first_usable_poster_shaped_picture_wins(self):
+        sizes = {"https://a/banner.jpg": (1900, 400), "https://a/hero.jpg": (3840, 2160)}
+        self.assertEqual(dp.pick_image(["https://a/banner.jpg", "https://a/hero.jpg"], self.probe(sizes)),
+                         "https://a/hero.jpg")
+
+    def test_a_thin_banner_is_better_than_nothing(self):
+        self.assertEqual(dp.pick_image(["https://a/banner.jpg"], self.probe({"https://a/banner.jpg": (1900, 400)})),
+                         "https://a/banner.jpg")
+
+    def test_pictures_discord_could_not_fetch_are_passed_over(self):
+        sizes = {"https://a/ok.jpg": (460, 690)}
+        self.assertEqual(dp.pick_image(["https://a/blocked.jpg", "http://a/insecure.jpg", "https://a/ok.jpg"],
+                                       self.probe(sizes)), "https://a/ok.jpg")
+        self.assertEqual(dp.pick_image(["https://a/blocked.jpg"], self.probe({})), "")
+
+    def test_logos_and_repeats_are_never_fetched(self):
+        asked = []
+        dp.pick_image(["https://a/logo.png", "https://a/x.jpg", "https://a/x.jpg"], lambda u: asked.append(u))
+        self.assertEqual(asked, ["https://a/x.jpg"])
+
+    def test_probe_reads_a_real_picture_and_refuses_other_things(self):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (460, 690)).save(buf, "PNG")
+
+        class Resp:
+            def __init__(self, kind, body, status=200):
+                self.headers, self.status, self.body = {"Content-Type": kind}, status, io.BytesIO(body)
+
+            def read(self, n):
+                return self.body.read(n)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+        self.assertEqual(dp.probe_image("https://a/p.png", opener=lambda u: Resp("image/png", buf.getvalue())), (460, 690))
+        self.assertIsNone(dp.probe_image("https://a/p", opener=lambda u: Resp("text/html", b"<html>")))
+        self.assertIsNone(dp.probe_image("https://a/p.svg", opener=lambda u: Resp("image/svg+xml", b"<svg/>")))
+        self.assertIsNone(dp.probe_image("https://a/p.png", opener=lambda u: Resp("image/png", b"x", status=403)))
+        self.assertIsNone(dp.probe_image("https://a/p.png", opener=lambda u: 1 / 0))
 
 
 class YoutubeInfo(unittest.TestCase):

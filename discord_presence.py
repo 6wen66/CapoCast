@@ -146,9 +146,11 @@ def clean_title(title, site="", page_url=""):
             run = run[1:]
         if run and (len(run) >= 2 or run[0] in STRONG):     # a lone 'Online' or 'Movie' could be part of the title
             words, trimmed = words[:end], True              # 'English Sub', 'Free Online', 'HD'
-        if trimmed and len(words) > 1 and _squash(words[0]) == "watch":
-            words = words[1:]
         kept.append(" ".join(words))
+    if trimmed and kept:                                    # 'Watch Ghost in the Shell - Miruro': the site came off *after*
+        first = kept[0].split()                             # this segment was read, so the leading Watch is dealt with here
+        if len(first) > 1 and _squash(first[0]) == "watch":
+            kept[0] = " ".join(first[1:])
     cleaned = " · ".join(kept)
     return clip(cleaned, original) if len(_squash(cleaned)) >= 2 else clip(original, "")
 
@@ -157,6 +159,63 @@ def looks_like_logo(url):
     """A site's own logo or icon rather than a picture of what's playing (so a poster is the better choice)."""
     path = urlparse(str(url or "")).path.lower()
     return any(w in path for w in ("logo", "favicon", "apple-touch", "/icon", "default-og", "placeholder"))
+
+
+MAX_PROBE_BYTES = 262_144       # enough of an image to read its size from the header
+BAD_TYPES = ("image/svg", "image/avif", "image/x-icon", "image/vnd.microsoft.icon")
+
+
+def probe_image(url, timeout=3.0, opener=None):
+    """(width, height) of the picture at `url` if it can be fetched the way Discord's servers will (a plain GET, no
+    cookies, no Referer, a browser-like agent) and is a picture Discord can show; None otherwise. Reads only the start."""
+    try:
+        from PIL import ImageFile
+        if opener is None:
+            import urllib.request
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "image/*,*/*;q=0.5"})
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        else:
+            resp = opener(url)
+        with resp:
+            kind = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if getattr(resp, "status", 200) != 200 or not kind.startswith("image/") or kind.startswith(BAD_TYPES):
+                return None
+            if int(resp.headers.get("Content-Length") or 0) > 8_000_000:
+                return None                                 # too heavy to be a thumbnail
+            parser, got = ImageFile.Parser(), 0
+            while got < MAX_PROBE_BYTES:
+                chunk = resp.read(16384)
+                if not chunk:
+                    break
+                got += len(chunk)
+                parser.feed(chunk)
+                if parser.image is not None:
+                    return parser.image.size
+        return None
+    except Exception:
+        return None
+
+
+def pick_image(candidates, probe=probe_image, deadline=9.0, log=lambda m: None):
+    """The best thumbnail among page-supplied picture addresses (best guesses first), or ''. Each one is fetched like
+    Discord will fetch it, and one that can't be is passed over: otherwise Discord shows its grey placeholder. A poster
+    or 16:9 shape wins over a thin banner (which Discord crops to a square) when there is one."""
+    end, valid, seen = time.time() + deadline, [], set()
+    for url in candidates:
+        url = clean_image(url)
+        if not url or url in seen or looks_like_logo(url):
+            continue
+        seen.add(url)
+        if time.time() > end or len(seen) > 7:
+            break
+        size = probe(url)
+        log(f"discord picture {'ok ' + 'x'.join(map(str, size)) if size else 'unusable'}: {url[:110]}")
+        if not size:
+            continue
+        if 0.55 <= size[0] / max(size[1], 1) <= 2.0:
+            return url
+        valid.append(url)
+    return valid[0] if valid else ""
 
 
 _info_cache = {}
