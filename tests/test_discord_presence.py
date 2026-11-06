@@ -220,8 +220,9 @@ class FakePresence:
     def __init__(self, client_id, log=None):
         self.client_id, self.calls, self.stopped = client_id, [], False
 
-    def set(self, title, state, since=None, image=None, image_text=None):
+    def set(self, title, state, since=None, image=None, image_text=None, end=None, paused=False):
         self.calls.append(("set", title, state, image))
+        self.last = {"since": since, "end": end, "paused": paused, "state": state}
 
     def clear(self):
         self.calls.append(("clear",))
@@ -287,6 +288,93 @@ class SharedStatus(unittest.TestCase):
         self.assertTrue(self.made[0].stopped)
         st.show("web", "Frieren", "x")
         self.assertEqual(self.made[1].client_id, "987654321098765432")
+
+
+class Clock(unittest.TestCase):
+    """The Discord clock follows the video: its position, its length, and whether it is playing."""
+
+    def setUp(self):
+        self.made = []
+        self.st = dp.Status("123456789012345678", factory=lambda cid, log: self.made.append(FakePresence(cid)) or self.made[-1])
+        self.st.enable("web", True)
+        self.now = 10_000.0
+
+    def up(self):
+        return self.made[0].last
+
+    def test_a_known_length_counts_down_the_time_left(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.assertTrue(self.st.progress("web", 300, 1400, True, now=self.now))
+        self.assertEqual(self.up()["since"], self.now - 300)
+        self.assertEqual(self.up()["end"], self.now - 300 + 1400)
+
+    def test_nothing_is_sent_while_the_clock_is_still_right(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.st.progress("web", 300, 1400, True, now=self.now)
+        sent = len(self.made[0].calls)
+        for i in range(1, 30):                                   # a poll a second: the position moves with the clock
+            self.assertFalse(self.st.progress("web", 300 + i, 1400, True, now=self.now + i + 0.4))
+        self.assertEqual(len(self.made[0].calls), sent)
+
+    def test_a_scrub_or_a_stall_corrects_it(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.st.progress("web", 300, 1400, True, now=self.now)
+        self.assertTrue(self.st.progress("web", 900, 1400, True, now=self.now + 5))        # jumped ahead
+        self.assertEqual(self.up()["since"], self.now + 5 - 900)
+        self.assertTrue(self.st.progress("web", 900.5, 1400, True, now=self.now + 25))     # the TV sat buffering for 20 s
+        self.assertAlmostEqual(self.up()["since"], self.now + 25 - 900.5)
+
+    def test_pausing_stops_the_clock_and_resuming_restarts_it_where_the_video_is(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.st.progress("web", 300, 1400, True, now=self.now)
+        self.assertTrue(self.st.progress("web", 310, 1400, False, now=self.now + 10))
+        self.assertTrue(self.up()["paused"])
+        self.assertEqual(self.up()["state"], "Paused · s")
+        self.assertFalse(self.st.progress("web", 310, 1400, False, now=self.now + 60))       # still paused: nothing to say
+        self.assertTrue(self.st.progress("web", 310, 1400, True, now=self.now + 120))
+        self.assertFalse(self.up()["paused"])
+        self.assertEqual(self.up()["since"], self.now + 120 - 310)
+        self.assertEqual(self.up()["state"], "s")
+
+    def test_an_unknown_length_counts_up_and_ignores_small_differences(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.assertFalse(self.st.progress("web", 1.0, 0, True, now=self.now + 1.2))
+        self.assertTrue(self.st.progress("web", 600, 0, True, now=self.now + 2))
+        self.assertIsNone(self.up()["end"])
+
+    def test_only_the_source_on_show_is_touched(self):
+        self.st.enable("youtube", True)
+        self.st.show("youtube", "T", "s", since=self.now)
+        self.assertFalse(self.st.progress("web", 300, 1400, True, now=self.now))
+        self.st.clear("youtube")
+        self.assertFalse(self.st.progress("youtube", 300, 1400, True, now=self.now))
+
+    def test_a_position_past_the_end_is_not_a_countdown(self):
+        self.st.show("web", "T", "s", since=self.now)
+        self.st.progress("web", 1500, 1400, True, now=self.now)
+        self.assertIsNone(self.up()["end"])
+
+
+class TimestampsOnTheWire(unittest.TestCase):
+    def activity(self, **kw):
+        conn = FakeDiscord()
+        p = dp.Presence("123456789012345678", opener=lambda: conn, min_gap=0)
+        p.set("T", "s", **kw)
+        self.assertTrue(wait_for(lambda: conn.activities()))
+        p.stop()
+        return conn.activities()[0]
+
+    def test_start_and_end_make_discord_count_down(self):
+        self.assertEqual(self.activity(since=1000, end=2400)["timestamps"], {"start": 1000, "end": 2400})
+
+    def test_start_alone_counts_up(self):
+        self.assertEqual(self.activity(since=1000)["timestamps"], {"start": 1000})
+
+    def test_paused_shows_no_clock(self):
+        self.assertNotIn("timestamps", self.activity(since=1000, end=2400, paused=True))
+
+    def test_an_end_before_the_start_is_dropped(self):
+        self.assertEqual(self.activity(since=1000, end=900)["timestamps"], {"start": 1000})
 
 
 class Wiring(unittest.TestCase):

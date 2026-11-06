@@ -275,12 +275,14 @@ class MediaRelay:
         """Register a stream; returns the URL to give the Roku. HLS can begin `start` seconds in."""
         return self._keep(Session(url, headers, kind, secrets.token_hex(8), start if kind == "hls" else 0.0))
 
-    def add_upscaled(self, url, headers, kind, start, duration, mode, audio):
-        """Like add(), but the TV gets an upscaled 4K copy made on this PC. Any kind of stream can begin `start` seconds
-        in. One encoder at a time: the GPU has one TV to feed, so this replaces any upscale already running."""
+    def add_upscaled(self, url, headers, kind, start, duration, mode, audio, subs=None):
+        """Like add(), but the TV gets a copy made on this PC: upscaled to 4K, with subtitles (a file at `subs`) burned
+        in, or both. Any kind of stream can begin `start` seconds in. One encoder at a time: the GPU has one TV to feed,
+        so this replaces any upscale already running."""
         self.stop_upscaling()
         sent = {**{"User-Agent": UA}, **replay_headers(headers)}
-        return self._keep(UpscaleSession(url, sent, kind, secrets.token_hex(8), start, duration, mode, audio, self.log))
+        return self._keep(UpscaleSession(url, sent, kind, secrets.token_hex(8), start, duration, mode, audio, self.log,
+                                     subs))
 
     def stop_upscaling(self):
         with self._lock:

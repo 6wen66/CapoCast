@@ -2,7 +2,7 @@
 <meta charset="utf-8">
 <title>player</title>
 <style>html, body { margin: 0; background: #000 } video { width: 100%; height: 100%; display: block }</style>
-<video id="v" muted poster="https://thumbs.example/decoy-poster.jpg"></video>
+<video id="v" muted poster="https://thumbs.example/decoy-poster.jpg"><track kind="subtitles" srclang="en" label="English" src="/en.vtt" default></video>
 <script>
   // A pre-roll ad (12 s) plays first, then the real episode: the case the stream filter has to get right.
   const v = document.getElementById('v');

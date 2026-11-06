@@ -74,6 +74,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(data[a:b + 1], "video/mp4", 206,
                                   {"Content-Range": f"bytes {a}-{b}/{len(data)}", "Accept-Ranges": "bytes"})
             return self._send(data, "video/mp4", 200, {"Accept-Ranges": "bytes"})
+        if path == "/en.vtt":
+            body = b"WEBVTT\n\n00:00:01.000 --> 00:02:20.000\nDecoy subtitle\n"
+            return self._send(body, "text/vtt; charset=utf-8", extra={"Access-Control-Allow-Origin": "*"})
         if path in ("/pop", "/ad", "/page2"):
             return self._send(f"<title>{path}</title><h1>{path}</h1>".encode())
         self._send(b"not found", "text/plain", 404)

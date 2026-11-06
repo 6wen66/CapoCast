@@ -266,10 +266,14 @@ class Presence:
         self._stopping = False
 
     # ---- what callers use -----------------------------------------------------------------
-    def set(self, details, state, since=None, image=None, image_text=None):
-        """image: an https picture address (a thumbnail), shown large beside the text, if Discord accepts it."""
-        activity = {"details": clip(details, "Watching"), "state": clip(state, "On the TV"),
-                    "timestamps": {"start": int(since or time.time())}, "instance": False}
+    def set(self, details, state, since=None, image=None, image_text=None, end=None, paused=False):
+        """image: an https picture address (a thumbnail), shown large beside the text, if Discord accepts it.
+        since is when the video's position was 0:00 (so Discord's clock reads the position in the video); with end, when
+        it will be over, Discord counts down the time left instead. paused shows no clock at all."""
+        activity = {"details": clip(details, "Watching"), "state": clip(state, "On the TV"), "instance": False}
+        if not paused:
+            start = int(since or time.time())
+            activity["timestamps"] = {"start": start, **({"end": int(end)} if end and end > start else {})}
         image = clean_image(image)
         if image:
             activity["assets"] = {"large_image": image, "large_text": clip(image_text or details, "Watching")}
@@ -384,6 +388,7 @@ class Status:
         self.log, self._factory = log, factory
         self.enabled = {}                       # source -> switched on
         self.showing = None                     # the source whose status is up
+        self._shown = {}                        # source -> what it last put up, so progress() can correct just the clock
         self._presence = None
         self._lock = threading.Lock()
 
@@ -402,7 +407,9 @@ class Status:
         if not on:
             self.clear(source)
 
-    def show(self, source, title, state, since=None, image=None, image_text=None):
+    DRIFT = 3.0                                 # seconds the clock may be off before it is corrected
+
+    def show(self, source, title, state, since=None, image=None, image_text=None, end=None, paused=False):
         """Put `title` up as `source`'s status. Does nothing if that source is off or there is no Application ID."""
         with self._lock:
             if not self.is_on(source):
@@ -411,8 +418,45 @@ class Status:
                 self._drop_presence()
                 self._presence = self._factory(self.client_id, self.log)
             self.showing = source
-            self._presence.set(title, state, since, image=image, image_text=image_text or title)
+            self._shown[source] = {"title": title, "state": state, "since": since or time.time(), "image": image,
+                                   "image_text": image_text or title, "end": end, "paused": paused}
+            self._send_shown(source)
             return True
+
+    def progress(self, source, pos, dur, playing, now=None):
+        """Keep the status's clock true to the video: `pos` seconds in, `dur` long (0 if not known), playing or paused.
+
+        Called every second or so with what the TV reports. Nothing is sent unless something changed: playing became
+        paused (or back), or the position no longer fits the clock (a seek, a stall, the TV catching up) by more than
+        DRIFT seconds. While playing, Discord's clock counts down the time left when the length is known and up from the
+        start of the video when it isn't. Returns True if the status was updated."""
+        now = now or time.time()
+        with self._lock:
+            shown = self._shown.get(source)
+            if self.showing != source or not shown or self._presence is None or pos is None:
+                return False
+            paused = not playing
+            since, end = shown["since"], shown["end"]
+            if playing:
+                if dur and 0 <= pos < dur:
+                    since = now - pos
+                    end = since + dur
+                elif not dur and pos > 0 and abs((now - pos) - since) > self.DRIFT:
+                    since = now - pos
+            changed = paused != shown["paused"]
+            if not changed and playing:
+                changed = abs(since - shown["since"]) > self.DRIFT or (end is None) != (shown["end"] is None)
+            if not changed:
+                return False
+            shown.update(since=since, end=end, paused=paused)
+            self._send_shown(source)
+            return True
+
+    def _send_shown(self, source):
+        s = self._shown[source]
+        state = f"Paused · {s['state']}" if s["paused"] else s["state"]
+        extra = {k: v for k, v in (("end", s["end"]), ("paused", s["paused"])) if v}
+        self._presence.set(s["title"], state, s["since"], image=s["image"], image_text=s["image_text"], **extra)
 
     def clear(self, source):
         """Take `source`'s status down, if it is the one showing."""
@@ -420,6 +464,7 @@ class Status:
             if self.showing == source and self._presence is not None:
                 self._presence.clear()
                 self.showing = None
+            self._shown.pop(source, None)
 
     def stop(self):
         with self._lock:
@@ -427,6 +472,7 @@ class Status:
 
     def _drop_presence(self):
         presence, self._presence, self.showing = self._presence, None, None
+        self._shown.clear()
         if presence is not None:
             presence.stop()
 

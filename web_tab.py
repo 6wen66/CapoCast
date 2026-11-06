@@ -15,6 +15,7 @@ import math
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -24,6 +25,7 @@ from urllib.parse import urlparse
 import brave_profile
 import discord_presence
 import drm
+import subtitles
 import upscaler
 from media_relay import MediaRelay, probe_all
 from next_episode import NextEpisode
@@ -31,7 +33,7 @@ from roku_listen import local_ip_for
 from stream_finder import Candidate, apply_page_videos, choose, score
 from web_guard import WebGuard, normalize_address
 from web_sync import WebSync
-from web_view import PageView
+from web_view import PageView, key_events
 
 HOME = "https://duckduckgo.com"
 UPSCALE_NAMES = {"off": "Off", "fast": "Anime4K", "hq": "Anime4K HQ", "movie": "Movie"}
@@ -94,16 +96,19 @@ class Tv:
 class WebTab:
     discord, cast_since = None, 0.0                       # defaults for anything built without __init__
     upscale_owner, tv_gone, cast_image, cast_session = None, 0, None, None
+    cast_end = None                                           # when the video will end by Discord's clock, if its length is known
+    subs, sub_dir = "", None                                  # subtitle language chosen ('' = off); folder for fetched files
     cast_site = ""                                           # the site being cast from, for the Discord status
 
     SOURCE = "web"                                        # this tab's name in the shared Discord status
 
-    def __init__(self, app, page, ui, home=None, upscale=None, discord=None):
+    def __init__(self, app, page, ui, home=None, upscale=None, discord=None, subs=""):
         self.app, self.page, self.ui = app, page, ui
         self.discord = discord                            # discord_presence.Status, shared with the YouTube tab
         self.cast_since = 0.0                             # when the current cast began, for Discord's timer
         self.home = home or HOME
         self.upscale = upscale if upscale in UPSCALE_NAMES else "off"
+        self.subs = str(subs or "").strip().lower()
         self.upscaled = None                              # what the TV's upscaled cast was made with, while there is one
         self.guard = WebGuard(ui.log, home=self.home)
         self.proc = None
@@ -162,6 +167,10 @@ class WebTab:
         self.upscale_lbl.pack(side="right", padx=(0, 12))
         self.upscale_lbl.bind("<Button-1>", lambda e: self.next_upscale())
         self._paint_upscale()
+        self.subs_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
+        self.subs_lbl.pack(side="right", padx=(0, 12))
+        self.subs_lbl.bind("<Button-1>", lambda e: self.next_subs())
+        self._paint_subs()
         self.discord_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
         self.discord_lbl.pack(side="right", padx=(0, 12))
         self.discord_lbl.bind("<Button-1>", lambda e: self.toggle_discord())
@@ -254,6 +263,7 @@ class WebTab:
                 if self.view.has_frame and self.msg.cget("text"):
                     self._message("")
                 self._watch_next()
+                self.guard.phone_expire()
             self._refresh()
         except Exception as e:
             self.ui.log(f"web tab error: {e!r}")
@@ -263,10 +273,13 @@ class WebTab:
     def _refresh(self):
         ui = self.ui
         snap = self.guard.snapshot()
+        self._record_visit(snap)
         if snap["url"] and self.app._focused() is not self.entry and self.url.get() != snap["url"]:
             self.url.set(snap["url"])
         if time.time() < self.note_until:
             text, color = self.note
+        elif self.guard.phone_active:
+            text, color = "Your phone is browsing here", ui.GREEN
         elif not self.alive():
             text, color = "", ui.MUTED
         elif snap["error"] or self.guard.error:
@@ -316,6 +329,82 @@ class WebTab:
         on = self.upscale != "off"
         self.upscale_lbl.config(text="Upscale: " + UPSCALE_NAMES[self.upscale], fg=self.ui.ACCENT if on else self.ui.MUTED)
 
+    def _paint_subs(self):
+        self.subs_lbl.config(text="Subtitles: " + (self.subs.title() or "Off"),
+                             fg=self.ui.ACCENT if self.subs else self.ui.MUTED)
+
+    def next_subs(self):
+        """Clicking the label steps through Off and each subtitle language the page has offered so far. It applies from
+        the next cast (the PC draws the words onto the video, since the TV can't show a separate subtitle file), and the
+        language is remembered for other pages."""
+        tracks = self._page_tracks()
+        options = [""]
+        for t in tracks:
+            want = (t["lang"] or t["label"]).lower()
+            if want not in options:
+                options.append(want)
+        if len(options) == 1:
+            if self.subs:
+                self.subs = ""
+                self._save_settings()
+            else:
+                self._note("No subtitle files seen on this page yet. Turn captions on in the video's player, then "
+                           "click again.", self.ui.AMBER, 10)
+        else:
+            current = options.index(self.subs) if self.subs in options else 0
+            self.subs = options[(current + 1) % len(options)]
+            why = upscaler.missing(upscaler.BURN, True) if self.subs else ""
+            if why:
+                self.subs = ""
+                self._note(why, self.ui.AMBER, 12)
+            self._save_settings()
+        self._paint_subs()
+        if self.subs:
+            self._note(f"Next cast: {self.subs.title()} subtitles, drawn onto the video on this PC", self.ui.MUTED, 6)
+
+    def _save_settings(self):
+        save = getattr(self.app, "_save", None)
+        if save:
+            save()
+
+    def _page_tracks(self, cand=None):
+        """The subtitle tracks this page offers: the files its player fetched, its <track> elements, and (given the
+        stream being cast) the ones its master playlist lists."""
+        files, dom = self.guard.subtitle_sources(cand.duration if cand else 0)
+        renditions = subtitles.fetch_renditions(cand.url, cand.headers) if cand else []
+        return subtitles.build_tracks(files, dom, renditions, cand.headers if cand else None)
+
+    def _prepare_subs(self, attempt, cand):
+        """Worker thread: fetch the chosen subtitle track to this PC as a styled ASS file. Returns its path, or '' to
+        cast without (saying why)."""
+        if not self.subs:
+            return ""
+        ui = self.ui
+        tracks = self._page_tracks(cand)
+        track = subtitles.pick_track(tracks, self.subs)
+        if track is None:
+            hint = "" if tracks else " (the player hasn't loaded any: turn its captions on first)"
+            self._post(lambda: self._note(f"No {self.subs.title()} subtitles on this page{hint}, casting without",
+                                          ui.AMBER, 12))
+            return ""
+        self._post(lambda: self._note(f"Getting the {track['label']} subtitles…", ui.AMBER, 60))
+        if self.sub_dir is None:
+            self.sub_dir = tempfile.mkdtemp(prefix="capocast-subs-")
+        out = os.path.join(self.sub_dir, f"subs{attempt}.ass")
+        ok = subtitles.to_ass(track, out, ui.log)
+        self._check(attempt)
+        if not ok:
+            self._post(lambda: self._note("Couldn't get those subtitles, casting without", ui.AMBER, 10))
+            return ""
+        ui.log(f"subtitles: {track['label']} from {track['url'][:110]}")
+        for name in os.listdir(self.sub_dir):                  # earlier casts' files aren't needed any more
+            if name != os.path.basename(out):
+                try:
+                    os.remove(os.path.join(self.sub_dir, name))
+                except OSError:
+                    pass
+        return out
+
     def _paint_discord(self):
         self.discord_lbl.config(text="Discord: " + ("On" if self.discord_on else "Off"),
                                 fg=self.ui.ACCENT if self.discord_on else self.ui.MUTED)
@@ -354,13 +443,17 @@ class WebTab:
         if title is None:
             self.discord.clear(self.SOURCE)
             return
-        mode = (self.upscaled or {}).get("mode")
+        plan = self.upscaled or {}
+        mode = plan.get("mode")
         state = f"on {site}" if site else "Casting to the TV"
-        if mode:
+        if mode in UPSCALE_NAMES:
             name = UPSCALE_NAMES[mode]
             state += f" · {name} upscale" if "4K" in name else f" · 4K upscale ({name})"      # never says 4K twice
+        if plan.get("subs"):
+            state += " · subtitles"
+        extra = {"end": self.cast_end} if self.cast_end else {}
         self.discord.show(self.SOURCE, f"Watching {title}", state, self.cast_since or None, image,
-                          image_text=f"{title} · {site}" if site else title)
+                          image_text=f"{title} · {site}" if site else title, **extra)
 
     def next_upscale(self):
         """Clicking the label steps through Off, Anime4K, Anime4K HQ and Movie. It applies from the next cast."""
@@ -404,11 +497,27 @@ class WebTab:
         elif reason == "Stopped":
             self._post(lambda: self._note("Stopped casting", self.ui.MUTED, 6))
 
+    def _feed_clock(self, st):
+        """Give Discord the TV's real position and play/pause state, so its clock follows what's being watched (pausing,
+        scrubbing, buffering) rather than the time since Cast was pressed. Position in the video is the TV's position plus
+        where the TV's stream began."""
+        sync = self.sync
+        if not (self.discord and st and sync is not None and sync.active and not sync.live):
+            return
+        if self.discord.showing != self.SOURCE or time.time() < sync.settle_until:
+            return                                        # a restart in progress still reports the old position
+        if st["state"] not in ("play", "pause") or st.get("app") not in ("RokuCast", ""):
+            return                                        # buffering or elsewhere: leave the clock as it is
+        pos = st["pos"] + sync.offset
+        dur = sync.dur or ((st["dur"] + sync.offset) if st["dur"] else 0)
+        self.discord.progress(self.SOURCE, pos, dur, st["state"] == "play")
+
     def tv_state(self, st):
         """Fed by the app's once-a-second look at the TV (None if it can't be reached). WebSync notices the TV leaving
         while the page is being followed; this covers the rest: you left the page, or a recast failed, and the TV has
         since gone somewhere else. Then the Discord status comes down and the encoder stops, rather than both carrying
         on for a cast nobody is watching."""
+        self._feed_clock(st)
         left_over = bool(self.upscaled or (self.discord and self.discord.showing == self.SOURCE))
         following = self.sync is not None and self.sync.active
         if st is None or following or self.busy or not left_over:
@@ -479,7 +588,212 @@ class WebTab:
         threading.Thread(target=self._guarded, args=(self.attempt, self._find, snap["url"], snap["title"]),
                          daemon=True).start()
 
+    # ---- casting a link sent from the phone ---------------------------------------------------------------
+    LINK_OPEN_WAIT, LINK_STREAM_WAIT, LINK_SETTLE = 45.0, 25.0, 3.0   # seconds: browser ready / video seen / let it start
+
+    link = None                                           # (url, started, navigated, stream_seen_at) while one is being set up
+
+    def cast_link(self, url):
+        """From any thread: open `url` in this tab's browser and cast it once a video stream shows up. Returns the
+        message to show on the phone, or raises ValueError with the reason it can't be done."""
+        url = normalize_address(url, self.home)           # plain words become a search, never a script: always http(s)
+        refusal = drm.refusal_for(url)
+        if refusal:
+            raise ValueError(refusal.splitlines()[0])
+        if self.busy:
+            raise ValueError("A cast is already starting on the PC. Wait a moment, or stop it first.")
+        self._post(lambda: self._link_begin(url))
+        return "Opening it on the PC, then it goes to the TV"
+
+    def _link_begin(self, url):
+        if self.busy:
+            return
+        self.next.disarm()
+        self.link = (url, time.time(), False, 0.0)
+        self._note("From your phone: opening the page…", self.ui.AMBER, 60)
+        if not self.alive():
+            self.launch()
+        self.app.after(500, self._link_step)
+
+    def _link_step(self):
+        link = self.link
+        if not link:
+            return
+        url, t0, navigated, seen = link
+        now = time.time()
+        if self.busy:                                     # someone pressed Cast on the PC in the meantime
+            self.link = None
+            return
+        if not navigated:
+            if self.alive() and self.guard.snapshot()["running"]:
+                self.guard.navigate(url)
+                self.link = (url, now, True, 0.0)
+            elif now - t0 > self.LINK_OPEN_WAIT:
+                self.link = None
+                return self._note("From your phone: the Web tab's browser didn't start", self.ui.RED, 12)
+        else:
+            if not seen and self.guard.has_fresh_stream():
+                seen = now
+                self.link = (url, t0, True, seen)
+                self._note("From your phone: found the video, starting the cast…", self.ui.AMBER, 60)
+            if (seen and now - seen >= self.LINK_SETTLE) or now - t0 > self.LINK_STREAM_WAIT:
+                self.link = None                          # no stream by now: cast() still tries yt-dlp, or says what's missing
+                return self.cast()
+        self.app.after(500, self._link_step)
+
+    # ---- browsing from the phone ----------------------------------------------------------------------------
+    # The phone shows this tab's page as a live picture and sends taps, scrolls and typing back, so everything
+    # (the ad blocking, pop-up protection, finding the video, casting) happens here, exactly as with the mouse.
+    PHONE_KEYS = {"Enter": "Return", "Backspace": "BackSpace", "Tab": "Tab", "Escape": "Escape"}
+
+    def phone_open(self):
+        """Make sure the browser is running (from any thread)."""
+        if not self.alive() and time.time() - self.launched_at > 5:
+            self._post(lambda: None if self.alive() else self.launch())
+
+    def phone_frame(self, after, width, height, timeout=20.0):
+        """Wait for a picture newer than `after` at the phone's size -> (seq, jpeg, (w, h)), or None if nothing changed."""
+        self.phone_open()
+        end = time.time() + timeout
+        while time.time() < end:
+            g = self.guard
+            if g.running:
+                g.phone_watch(width, height)
+                seq, data = g.frame()
+                if data and seq != after and self._frame_fits(g):
+                    return seq, data, g.view_size()
+            time.sleep(0.03)
+        return None
+
+    @staticmethod
+    def _frame_fits(g):
+        """False for a frame drawn before the browser switched to the phone's size (it would show squashed)."""
+        meta = getattr(g, "frame_meta", None) or {}
+        w, h = g.view_size()
+        return not meta.get("deviceWidth") or (abs(meta["deviceWidth"] - w) <= 1 and abs(meta.get("deviceHeight", h) - h) <= 1)
+
+    def phone_tap(self, x, y):
+        g = self.guard
+        g.mouse("mouseMoved", x, y)
+        g.mouse("mousePressed", x, y, "left", 1, 1)
+        g.mouse("mouseReleased", x, y, "left", 0, 1)
+
+    def phone_scroll(self, x, y, dx, dy):
+        self.guard.mouse("mouseWheel", x, y, dx=dx, dy=dy)
+
+    def phone_text(self, text):
+        self.guard.text(text)
+
+    def phone_key(self, name):
+        keysym = self.PHONE_KEYS.get(name)
+        if not keysym:
+            raise ValueError("unknown key")
+        for kind, ev in key_events(keysym, "", 0):
+            self.guard.key(ev)
+
+    def phone_nav(self, action, url=""):
+        g = self.guard
+        if action == "back":
+            g.back()
+        elif action == "forward":
+            g.forward()
+        elif action == "reload":
+            g.reload()
+        elif action == "home":
+            g.navigate(self.home)
+        elif action == "go":
+            target = normalize_address(url, self.home)
+            refusal = drm.refusal_for(target)
+            if refusal:
+                raise ValueError(refusal.splitlines()[0])
+            g.navigate(target)
+        else:
+            raise ValueError("unknown action")
+
+    def phone_info(self):
+        snap = self.guard.snapshot()
+        note = self.phone_note()
+        store = getattr(self.app, "phone_store", None)
+        return {"alive": self.alive(), "ready": bool(snap["running"]), "url": snap["url"], "title": snap["title"],
+                "bookmarked": bool(store and store.is_bookmarked(snap["url"])),
+                "streams": snap["streams"], "busy": self.busy or self.link is not None,
+                "following": bool(self.sync and self.sync.active), "watching": self.phone_watching(),
+                "note": {"text": note[0], "ok": note[1]} if note else None}
+
+    def phone_watching(self):
+        """What the TV is following right now, for the phone: {id, title, url} or None. `id` changes with each new cast,
+        so the phone can jump to the page when one starts."""
+        sync = self.sync
+        if not (sync and sync.active):
+            return None
+        return {"id": round(sync.started_at, 2), "title": sync.title or "", "url": self.cast_page}
+
+    def phone_transport(self, action, value=0):
+        """Play/pause or skip the page's video. While casting it is the page's video that the TV follows, so this is the
+        one control that keeps the page, the TV and the Discord clock together."""
+        dur = self.sync.dur if self.sync and self.sync.active else 0
+        if action == "toggle":
+            self.guard.toggle_page(dur)
+        elif action == "skip":
+            self.guard.skip_page(value, dur)
+        else:
+            raise ValueError("unknown action")
+
+    _visited = ("", "")
+
+    def _record_visit(self, snap):
+        """Feed the phone's history: every page this tab lands on (the title often arrives after the address)."""
+        store = getattr(self.app, "phone_store", None)
+        key = (snap["url"], snap["title"])
+        if store and snap["url"] and key != self._visited:
+            self._visited = key
+            store.visit(snap["url"], snap["title"])
+
+    def phone_pages(self):
+        """Bookmarks, recent pages and the current page's state, for the phone's Pages sheet."""
+        store = getattr(self.app, "phone_store", None)
+        snap = self.guard.snapshot()
+        if not store:
+            return {"bookmarks": [], "history": [], "current": {"url": snap["url"], "title": snap["title"], "bookmarked": False}}
+        return {"bookmarks": store.all_bookmarks(), "history": store.recent(),
+                "current": {"url": snap["url"], "title": snap["title"], "bookmarked": store.is_bookmarked(snap["url"])}}
+
+    def phone_bookmark(self, action, url=""):
+        """toggle: the page being looked at. remove: a saved page by address. Returns whether the current page is saved."""
+        store = getattr(self.app, "phone_store", None)
+        if not store:
+            raise ValueError("Bookmarks aren't available.")
+        snap = self.guard.snapshot()
+        if action == "toggle":
+            return store.toggle_bookmark(snap["url"], snap["title"])
+        if action == "remove":
+            store.remove_bookmark(url)
+            return store.is_bookmarked(snap["url"])
+        if action == "clear_history":
+            store.clear_history()
+            return store.is_bookmarked(snap["url"])
+        raise ValueError("unknown action")
+
+    def phone_cast(self):
+        """Cast whatever the phone is looking at, like pressing Cast on the PC. Returns what to tell the phone."""
+        snap = self.guard.snapshot()
+        if not self.alive() or not snap["running"]:
+            raise ValueError("The page isn't ready yet.")
+        refusal = drm.refusal_for(snap["url"])
+        if refusal:
+            raise ValueError(refusal.splitlines()[0])
+        cancelling = self.busy
+        self._post(self.cast)                             # cast() stops a cast in progress when called during one
+        return "Cancelled" if cancelling else "Looking for the video…"
+
+    def phone_note(self):
+        """What the phone's status line should say about the Web tab, as (text, ok) or None."""
+        if time.time() >= self.note_until or not self.note[0]:
+            return None
+        return self.note[0], self.note[1] == self.ui.GREEN
+
     def cancel_cast(self):
+        self.link = None
         if time.time() - self.cast_at < 0.6:              # the second half of a double-click on Cast
             return
         self.attempt += 1
@@ -631,7 +945,8 @@ class WebTab:
         relay = self._ensure_relay(host)
         relay.stop_upscaling()                            # whatever was being made for the last cast
         self.upscaled = None
-        plan = self._upscale_plan(cand)
+        subs = self._prepare_subs(attempt, cand)
+        plan = self._upscale_plan(cand, subs)
         self._check(attempt)
         # Start where the page already is, not at 0:00. The TV takes a few seconds to start, so aim a little ahead.
         page_t = self.guard.video_time(cand.duration)
@@ -682,39 +997,52 @@ class WebTab:
             self.ui.log(f"discord thumbnail: {image or 'none'} (page offered {len(found)})")
         return name or urlparse(cand.url).hostname or "video", site, image
 
-    def _upscale_plan(self, cand):
-        """Whether this cast can be upscaled: {'mode', 'duration', 'audio'}, or None to cast it as it is (saying why,
-        so the switch being on and the TV looking the same is never a mystery)."""
-        if self.upscale == "off":
+    def _upscale_plan(self, cand, subs=""):
+        """What the PC makes for this cast: {'mode', 'duration', 'audio', 'subs'}, or None to cast it as it is (saying
+        why, so a switch being on and the TV looking the same is never a mystery). The mode is the Upscale setting; with
+        subtitles chosen and no upscaling they're drawn onto the video at its own size ('burn')."""
+        mode = self.upscale if self.upscale != "off" else (upscaler.BURN if subs else "off")
+        if mode == "off":
             return None
-        ui, why = self.ui, upscaler.missing()
+        ui, burn = self.ui, mode == upscaler.BURN
+        why = upscaler.missing(mode, bool(subs))
+        if why and subs and not burn:
+            ui.log(f"upscale unavailable ({why}); trying subtitles alone")
+            mode, burn = upscaler.BURN, True
+            why = upscaler.missing(mode, True)
         if not why and cand.live:
-            why = "Live streams aren't upscaled"
+            why = "Live streams can't have subtitles added" if burn else "Live streams aren't upscaled"
         info = None
         if not why and (not cand.duration or not cand.height or cand.has_audio is None):
-            self._post(lambda: self._note("Reading the video for upscaling…", ui.AMBER, 30))
+            self._post(lambda: self._note("Reading the video…", ui.AMBER, 30))
             info = upscaler.probe(cand.url, cand.headers, cand.kind, ui.log)
         duration = cand.duration or (info or {}).get("duration") or 0
         height = cand.height or (info or {}).get("height") or 0
         audio = cand.has_audio if cand.has_audio is not None else (info or {}).get("audio", True)
         if not why and not duration:
-            why = "Can't upscale this one: its length isn't known"
+            why = ("Can't add subtitles to this one" if burn else "Can't upscale this one") + ": its length isn't known"
         if not why and cand.has_video is False:
-            why = "This stream has no picture to upscale"
-        if not why and height >= upscaler.TARGET_H:
-            why = "This video is already 4K"
+            why = "This stream has no picture to " + ("add subtitles to" if burn else "upscale")
+        if not why and not burn and height >= upscaler.TARGET_H:
+            if subs:
+                mode, burn = upscaler.BURN, True                  # already 4K: no upscaling, but the subtitles still go on
+            else:
+                why = "This video is already 4K"
         if why:
-            ui.log(f"upscale skipped: {why}")
+            ui.log(f"{'subtitles' if burn else 'upscale'} skipped: {why}")
             self._post(lambda: self._note(why + ", casting it as it is", ui.AMBER, 8))
             return None
-        return {"mode": self.upscale, "duration": duration, "audio": bool(audio)}
+        return {"mode": mode, "duration": duration, "audio": bool(audio), "subs": subs or None}
 
     def _start_upscale(self, attempt, relay, cand, start, plan):
         """Start the encoder and wait for its first piece. Returns the URL for the TV, or None to cast plainly."""
         ui = self.ui
-        self._post(lambda: self._note(f"Upscaling ({UPSCALE_NAMES[plan['mode']]})…", ui.AMBER, 60))
+        doing = ("Adding subtitles" if plan["mode"] == upscaler.BURN else f"Upscaling ({UPSCALE_NAMES[plan['mode']]})"
+                 + (" with subtitles" if plan.get("subs") else ""))
+        self._post(lambda: self._note(doing + "…", ui.AMBER, 60))
         self.upscale_owner = attempt                      # so a failure of this attempt (and only this one) stops it
-        url = relay.add_upscaled(cand.url, cand.headers, cand.kind, start, plan["duration"], plan["mode"], plan["audio"])
+        url = relay.add_upscaled(cand.url, cand.headers, cand.kind, start, plan["duration"], plan["mode"], plan["audio"],
+                                 plan.get("subs"))
         sess = relay.session_for(url)
         try:
             ready = sess.wait_ready(lambda: self._check(attempt))
@@ -726,7 +1054,8 @@ class WebTab:
             return url
         ui.log(f"upscale failed, casting plainly: {sess.error}")
         relay.stop_upscaling()
-        self._post(lambda: self._note("Upscaling failed, casting it as it is", ui.AMBER, 8))
+        failed = "Adding subtitles" if plan["mode"] == upscaler.BURN else "Upscaling"
+        self._post(lambda: self._note(f"{failed} failed, casting it as it is", ui.AMBER, 8))
         return None
 
     def _await_tv(self, attempt, sess):
@@ -793,15 +1122,20 @@ class WebTab:
                 self._post(lambda: self._note("The stream stopped: " + reason, self.ui.AMBER, 20))
             if not slow and getattr(sess, "stalls", 0) >= 3 and self.upscaled:
                 slow = True                                   # a seek swaps the session in the plan, so this follows it
-                self._post(lambda: self._note("Upscaling is running slower than the video, so the TV may buffer. The "
-                                              "site may be slow, or the GPU busy: try a lighter Upscale setting.",
-                                              self.ui.AMBER, 20))
+                if (self.upscaled or {}).get("mode") == upscaler.BURN:
+                    msg = ("Adding the subtitles is running slower than the video, so the TV may buffer. The site may "
+                           "be slow, or the GPU busy.")
+                else:
+                    msg = ("Upscaling is running slower than the video, so the TV may buffer. The site may be slow, or "
+                           "the GPU busy: try a lighter Upscale setting.")
+                self._post(lambda: self._note(msg, self.ui.AMBER, 20))
 
     def _relay_add(self, url, headers, kind, start):
         relay = self._ensure_relay(self.app._host)
         if self.upscaled:
             plan = self.upscaled
-            public = relay.add_upscaled(url, headers, kind, start, plan["duration"], plan["mode"], plan["audio"])
+            public = relay.add_upscaled(url, headers, kind, start, plan["duration"], plan["mode"], plan["audio"],
+                                        plan.get("subs"))
             plan["session"] = relay.session_for(public)
         else:
             public = relay.add(url, headers, kind, start)
@@ -812,7 +1146,13 @@ class WebTab:
         if attempt != self.attempt:
             return
         self.busy = False
-        self.cast_since = time.time()
+        # Discord's clock reads the position in the video: it started `offset` seconds in when the TV's stream began,
+        # and with the length known it counts down what's left. tv_state() keeps it true from here on.
+        now, sync = time.time(), self.sync
+        live = bool(sync and sync.live)
+        self.cast_since = now - (0.0 if live else float(getattr(sync, "offset", 0) or 0))
+        dur = float(getattr(sync, "dur", 0) or 0)
+        self.cast_end = self.cast_since + dur if dur and not live else None
         self._set_presence(label, self.cast_image, self.cast_site)
         self.next.arm(self.cast_page)
         self._note("On TV  ·  " + (label if len(label) <= 52 else label[:51] + "…") + "  ·  following this page",
@@ -828,6 +1168,8 @@ class WebTab:
         except Exception:
             pass
         self.guard.stop()
+        if self.sub_dir:
+            shutil.rmtree(self.sub_dir, ignore_errors=True)
         if self.relay:
             self.relay.stop()
         if self.proc is not None:

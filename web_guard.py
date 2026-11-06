@@ -21,6 +21,7 @@ import urllib.request
 
 from websockets.sync.client import connect
 
+import subtitles
 from discord_presence import looks_like_logo
 from media_relay import replay_headers
 from stream_finder import SNIFF_MIMES, Candidate, classify, host_of, is_ad_url, site_of, sniff
@@ -51,7 +52,9 @@ PAGE_JS = r"""
       const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
       out.push({src: v.currentSrc || v.src || '', dur: isFinite(v.duration) ? v.duration : 0,
                 playing: !v.paused && !v.ended && v.readyState > 2, area: Math.round(w * h), t: v.currentTime,
-                muted: v.muted, poster: v.poster || ''});
+                muted: v.muted, poster: v.poster || '',
+                tracks: [...v.querySelectorAll('track')].filter(t => t.src).map(t => ({
+                  src: t.src, label: t.label || '', lang: t.srclang || '', kind: t.kind || 'subtitles', def: t.default}))});
     }
     const s = JSON.stringify(out.map(o => ({...o, t: 0})));
     // report changes at once, and re-send every ~2 s so the app can tell "still playing" from "gone"
@@ -117,6 +120,16 @@ PAGE_JS = r"""
     if (!m || !m.__rl) return;
     if (m.__rl === 'pause') { for (const v of vids()) { try { v.pause(); } catch (x) {} } }
     else if (m.__rl === 'mirror') { mirror = !!m.on; applyMute(); }
+    else if (m.__rl === 'toggle' || m.__rl === 'skip') {
+      // what pressing the player's own buttons does (so the TV follows it); not marked as our own correction
+      const mine = vids().filter(v => v.readyState > 0 && (!m.dur || Math.abs(v.duration - m.dur) < 3));
+      if (m.__rl === 'toggle') {
+        const playing = mine.some(v => !v.paused && !v.ended);
+        for (const v of mine) { try { if (playing) v.pause(); else v.play(); } catch (x) {} }
+      } else {
+        for (const v of mine) { try { v.currentTime = Math.max(0, Math.min(isFinite(v.duration) ? v.duration - 1 : 1e9, v.currentTime + m.dt)); } catch (x) {} }
+      }
+    }
     else if (m.__rl === 'seek') {
       for (const v of vids()) {
         if (!m.dur || Math.abs(v.duration - m.dur) < 3) { ignoreUntil = Date.now() + 1500; try { v.currentTime = m.t; } catch (x) {} }
@@ -175,6 +188,7 @@ class WebGuard:
         self._ctx_frame = {}             # (sessionId, executionContextId) -> frameId
         self._reqs = {}                  # (sessionId, requestId) -> {"url","headers","frame"}
         self._sniffing = {}              # requests whose body we'll read to see if it's a hidden playlist
+        self._subs = {}                  # separate subtitle files the page has fetched: url -> {url, headers, frame}
         self._activity = {}              # host -> when the page last downloaded video pieces from it
         self._last_gesture = 0.0
         self._allowed = {}               # site -> expiry time ("Allow once")
@@ -183,6 +197,7 @@ class WebGuard:
         self.epoch = 0                   # counts main-page changes, so a cast can tell when you've left its page
         self._view = None                # (width, height, on): what the app wants drawn
         self._frame_seq, self._frame, self.frame_meta = 0, b"", {}
+        self._phone = None               # (width, height, last asked) while a phone is browsing
         self._ua = None                  # (userAgent, metadata) presented to sites instead of "HeadlessChrome"
         self._url, self._title, self._page_key = "", "", ""
         self._cands = {}                 # url -> Candidate
@@ -276,6 +291,14 @@ class WebGuard:
     def mirror(self, on):
         """On: the page's video is muted and reports play / pause / seek (see WebSync). Off: sound comes back."""
         self.post_page({"__rl": "mirror", "on": bool(on)})
+
+    def toggle_page(self, dur=0):
+        """Play or pause the page's video, as pressing its own button would (WebSync then moves the TV)."""
+        self.post_page({"__rl": "toggle", "dur": float(dur or 0)})
+
+    def skip_page(self, dt, dur=0):
+        """Jump the page's video forward or back by dt seconds, as scrubbing it would."""
+        self.post_page({"__rl": "skip", "dt": float(dt), "dur": float(dur or 0)})
 
     def seek_page(self, t, dur):
         """Move the page's copy of the video (the one that's `dur` seconds long) to t, without it counting as input."""
@@ -378,6 +401,32 @@ class WebGuard:
         self._view = (max(200, int(width)), max(120, int(height)), bool(on))
         self._cmds.put(("view", None))
 
+    PHONE_IDLE = 8.0                          # let go of the phone's view after this many seconds of silence
+
+    def phone_watch(self, width, height):
+        """A phone is looking at the page: render at its size (and stream) until it stops asking."""
+        w, h = max(240, min(int(width), 900)), max(240, min(int(height), 1600))
+        cur = self._phone
+        self._phone = (w, h, time.time())
+        if not cur or cur[:2] != (w, h):
+            self._cmds.put(("view", None))
+
+    def phone_expire(self):
+        """Back to the app's own size once the phone has gone quiet. Called now and then by the tab."""
+        p = self._phone
+        if p and time.time() - p[2] > self.PHONE_IDLE:
+            self._phone = None
+            self._cmds.put(("view", None))
+
+    @property
+    def phone_active(self):
+        return self._phone is not None
+
+    def view_size(self):
+        """(width, height) in CSS pixels that the page is being rendered at right now."""
+        p = self._phone
+        return p[:2] if p else (self._view[:2] if self._view else (0, 0))
+
     def frame(self):
         """(sequence number, JPEG bytes) of the newest frame; the number changes when there's a new one."""
         with self._lock:
@@ -463,16 +512,22 @@ class WebGuard:
     def _apply_view(self):
         """Render at the app's canvas size and stream it (or stop streaming while the tab is hidden)."""
         s = self._main
-        if not s or not self._view:
+        phone = self._phone
+        if not s or not (self._view or phone):
             return
-        w, h, on = self._view
+        if phone:                                         # a phone is browsing: its size, always streaming
+            (w, h), on = phone[:2], True
+        else:
+            w, h, on = self._view
         self._send("Emulation.setDeviceMetricsOverride", {"width": w, "height": h, "deviceScaleFactor": 1,
                                                           "mobile": False}, s)
         self._send("Page.stopScreencast", {}, s)
         if on:
             # every frame: a static page produces only one, and skipping frames would never deliver it
-            self._send("Page.startScreencast", {"format": "jpeg", "quality": 72, "maxWidth": w, "maxHeight": h,
-                                                "everyNthFrame": 1}, s)
+            # (frames come out at the CSS size whatever the device scale factor is, so there is no sharper option;
+            # a phone's picture gets a higher JPEG quality instead, because it is shown enlarged)
+            self._send("Page.startScreencast", {"format": "jpeg", "quality": 82 if phone else 72, "maxWidth": w,
+                                                "maxHeight": h, "everyNthFrame": 1}, s)
 
     def _on_targets(self, result):
         infos = (result or {}).get("targetInfos", [])
@@ -617,6 +672,7 @@ class WebGuard:
             if changed:                      # a new page: start its tallies and stream list afresh
                 self.epoch += 1
                 self._cands.clear()
+                self._subs.clear()
                 self._videos.clear()
                 self._unsupported = ""
                 self.stats = {"popups": 0, "redirects": 0, "overlays": 0, "ads": 0}
@@ -725,6 +781,9 @@ class WebGuard:
         url = resp.get("url") or r["url"]
         if not url.startswith(("http://", "https://")):
             return                           # blob: / data: addresses live inside the page; nothing else can fetch them
+        if subtitles.is_subtitle_url(url, resp.get("mimeType", "")) and not is_ad_url(url):
+            self._add_subtitle(url, r["frame"], replay_headers(r["headers"]))
+            return
         kind = classify(url, resp.get("mimeType", ""))
         if kind == "unsupported":
             with self._lock:
@@ -747,6 +806,22 @@ class WebGuard:
                 self._sniffing[(session, p["requestId"])] = (url, r["frame"], replay_headers(r["headers"]), size)
             return
         self._add_candidate(url, kind, r["frame"], replay_headers(r["headers"]), size)
+
+    def _add_subtitle(self, url, frame, headers):
+        with self._lock:
+            if url not in self._subs and len(self._subs) >= subtitles.MAX_TRACKS * 3:
+                self._subs.pop(next(iter(self._subs)))
+            self._subs[url] = {"url": url, "frame": frame, "headers": headers}
+
+    def subtitle_sources(self, dur=0):
+        """(files, dom_tracks): the subtitle files this page has fetched, and the <track> elements of the video being
+        cast (the one whose length is `dur`, if given). subtitles.build_tracks turns these into a list to choose from."""
+        now = time.time()
+        with self._lock:
+            files = [dict(f) for f in self._subs.values()]
+            dom = [t for e in self._videos.values() if now - e["at"] < 6 for v in e["items"]
+                   if not dur or not v.get("dur") or abs(v["dur"] - dur) < 3 for t in v.get("tracks") or []]
+        return files, dom
 
     def _add_candidate(self, url, kind, frame, headers, size):
         with self._lock:

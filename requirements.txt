@@ -2,6 +2,7 @@
 websockets==16.0          # Roku ECP session (private-listening handshake)
 sounddevice==0.5.6        # audio output (bundles PortAudio)
 Pillow==12.2.0            # logo rendering in the top bar
+segno==1.6.6              # draws the QR code for the phone remote
 audioop-lts==0.2.1; python_version >= "3.13"   # audioop was removed from the stdlib in Python 3.13
 
 # Build (only needed to produce RokuListen.exe)
