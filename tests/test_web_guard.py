@@ -102,3 +102,51 @@ class AddressChangeWithoutReload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubtitleCapture(unittest.TestCase):
+    """The guard remembers the separate subtitle files a page's player fetches, with the headers it fetched them with."""
+
+    def guard(self):
+        g = WebGuard()
+        self.addCleanup(g._stop.set)
+        return g
+
+    def respond(self, g, url, mime="text/vtt", rid="1", status=200):
+        g._reqs[("s", rid)] = {"url": url, "headers": {"Referer": "https://site/watch", "User-Agent": "UA"}, "frame": "f"}
+        g._on_Network_responseReceived({"requestId": rid, "type": "XHR",
+                                        "response": {"status": status, "url": url, "mimeType": mime, "headers": {}}}, "s")
+
+    def test_a_vtt_the_player_fetched_is_offered_with_its_headers(self):
+        g = self.guard()
+        self.respond(g, "https://cdn.example/subs/eng.vtt")
+        files, dom = g.subtitle_sources()
+        self.assertEqual([f["url"] for f in files], ["https://cdn.example/subs/eng.vtt"])
+        self.assertEqual(files[0]["headers"].get("Referer"), "https://site/watch")
+        self.assertEqual(dom, [])
+
+    def test_thumbnail_index_files_and_failed_fetches_are_not(self):
+        g = self.guard()
+        self.respond(g, "https://cdn.example/thumbnails.vtt", rid="2")
+        self.respond(g, "https://cdn.example/eng.vtt", rid="3", status=404)
+        self.assertEqual(g.subtitle_sources()[0], [])
+
+    def test_a_subtitle_file_is_not_mistaken_for_the_video(self):
+        g = self.guard()
+        self.respond(g, "https://cdn.example/eng.srt", mime="application/x-subrip")
+        self.assertEqual(g.candidates(), [])
+
+    def test_the_videos_own_track_elements_come_with_it(self):
+        g = self.guard()
+        track = {"src": "https://cdn.example/fr.vtt", "label": "Français", "lang": "fr", "kind": "subtitles", "def": False}
+        import time
+        g._videos[("s", "f")] = {"at": time.time(), "items": [{"dur": 1400.0, "tracks": [track]},
+                                                              {"dur": 30.0, "tracks": [dict(track, src="https://ads/x.vtt")]}]}
+        self.assertEqual(g.subtitle_sources(1400.0)[1], [track])
+
+    def test_a_new_page_forgets_the_old_pages_subtitles(self):
+        g = self.guard()
+        self.respond(g, "https://cdn.example/eng.vtt")
+        g._on_Page_frameNavigated({"frame": {"id": "m", "url": "https://other.example/ep2"}}, g._main)
+        self.assertEqual(g.subtitle_sources()[0], [])
+

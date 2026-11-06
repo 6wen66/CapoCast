@@ -174,11 +174,28 @@ Things to know:
 - **DRM is refused.** Netflix, Crunchyroll, Disney+ and similar can't be cast, and the app won't try to get around that. Use their own Roku channels.
 - **HLS, DASH and MP4.** WebM and MKV streams get a clear message instead of a black screen. Sites that hide their playlist under another name (`list.txt`, segments called `.jpg`) are recognised by what's inside. If the browser sees no stream at all, Cast asks [yt-dlp](https://github.com/yt-dlp/yt-dlp), if it's installed.
 - **The page is a picture.** Brave streams screenshots of the page to the app, so scrolling is a little less smooth than a real browser, and things that need a real window (drop-down lists, right-click menus, file pickers, full-screen) don't appear. Sites' own JavaScript alerts are dismissed automatically.
-- **Separate subtitle files aren't shown yet.** Subtitles burned into the video are.
+- **Subtitles** that are burned into the video just show. Separate subtitle files (WebVTT, SRT, ASS) can be added by your PC: see [Subtitles](#subtitles-on-the-tv) below.
 - **Auto-cast switches itself off** while a Web cast is playing, so the YouTube tab doesn't take the TV back. Turn it on again when you want it.
 - **Scrubbing isn't instant.** The RokuCast channel has no "seek to" command, so an HLS scrub restarts the stream at the new position (a couple of seconds) and an MP4 or DASH scrub steps ±10 s at a time. The muted copy on your PC is nudged back onto the TV's timeline now and then, so the page's slider stays honest.
 - **It checks the stream has picture and sound** before casting (a site may serve video and audio as separate playlists), treats the same video offered several times as one, and starts each cast on a fresh channel. If a stream starts failing part-way, the status line says so.
 - **Ads baked into the video itself** can't be removed.
+
+#### Subtitles on the TV
+
+The RokuCast channel on the TV can't show a separate subtitle file, so your PC draws the words onto the video itself and the TV plays the result, the same way upscaling works.
+
+**Subtitles** (right of the status line) steps through **Off** and each language the page has offered, and the language is remembered for other pages. It applies from the next cast.
+
+1. Open the video and turn **captions on in the site's own player** (many players only load a subtitle file once you ask for it).
+2. Click **Subtitles** until it shows the language you want. If the page has offered none yet, the status line says so.
+3. Press **Cast to TV**. The status line shows "Getting the English subtitles…" and then the cast starts.
+
+What it picks up: subtitle files the player fetched, its `<track>` elements, and the tracks listed in the stream's own playlist. Plain WebVTT and SRT get a bold white font with a dark outline, sized for a TV across the room. A fan-made `.ass` file keeps its own styling. If the page has no track in the language you chose, or the file can't be fetched, the cast carries on without subtitles and says why.
+
+- **It needs FFmpeg with subtitle support and an NVIDIA GPU** (the full build, `winget install Gyan.FFmpeg`), the same as upscaling. With **Upscale** off it only draws the words, at the video's own size, which costs much less than upscaling. With Upscale on, the words are drawn after the upscale so they stay sharp.
+- **Seeking keeps them in time.** A scrub restarts the encoder at the new position, and the words stay lined up with the picture.
+- **They're part of the picture**, so they can't be turned off from the TV. Click **Subtitles** back to **Off** and cast again.
+- **Not for live streams or videos of unknown length**, which cast as they are.
 
 #### Upscaling for the TV
 
@@ -204,10 +221,12 @@ Live streams, videos already in 4K and videos of unknown length are cast as they
 
 #### Discord status
 
-**Discord** shows what's on your TV as your Discord status: the title, a thumbnail of what you're watching, how long you've been watching, and whether it's being upscaled. There are two switches, both **off** until you turn them on:
+**Discord** shows what's on your TV as your Discord status: the title, a thumbnail of what you're watching, a clock that follows the video, and whether it's being upscaled or has subtitles. There are two switches, both **off** until you turn them on:
 
 - **Web tab:** **Discord** (right of the status line). The first line is what you're watching, taken from the page's title with the site's name and filler like "Watch … English Sub Online" removed. The second line names the site ("on Miruro", plus the upscaling if it's on). The picture is the page's own preview image (or the video's poster); a site's logo is skipped in favour of the poster. Not every site has one.
 - **YouTube tab:** **Discord**, beside Auto-cast in the top bar. It shows the video's title and thumbnail.
+
+**The clock follows what you watch**, not how long ago you pressed Cast. CapoCast reads the TV's real position once a second: when the video's length is known Discord counts down the time left ("12:03 left"), and when it isn't (a live stream) it counts up. Pausing stops the clock and shows "Paused", and resuming, scrubbing or a long buffer put it right again. Discord is only told when something actually changes.
 
 Either way, your status shows the title to anyone who can see it, and the most recent thing you started is what's shown.
 
@@ -218,6 +237,21 @@ Discord only shows a status for an app you've registered, so the first time you 
 3. Copy the **Application ID** from the General Information page and paste it into CapoCast.
 
 The text is sent only to the Discord app on your PC, over its local connection. The thumbnail is sent as a web address, so Discord (and the people who see your status) fetch that picture from the site or YouTube themselves. If Discord refuses the picture, the text is shown without it. The status clears when the cast ends, the TV leaves it, or you turn the switch off, and it needs the Discord desktop app to be open.
+
+### Phone remote
+
+Control the TV from an iPhone (or any phone) on the same Wi-Fi, with no app store, no Apple account and no signing. On the Listen tab click **Phone remote**, turn it on, scan the code with the phone's camera, open the link in Safari, then **Share > Add to Home Screen**. It then opens full screen like an app.
+
+- **Remote:** d-pad (hold to repeat), play/pause, skip 10 s, back, home, volume and mute, and a box for typing on the TV.
+- **Browse:** the Web tab's browser, on your phone. It shows the PC's page live (the same ad blocking and pop-up protection) and you tap, drag to scroll, type, and use the address bar, back and forward like any phone browser. **Cast this page** sends whatever you're looking at to the TV, with the same video finding as the PC's Cast button. Its play/pause and 10-second buttons control the page's video, so the TV, the page and Discord stay together. The picture is the PC browser's, so it is a little soft on a high-resolution screen.
+- **Now playing:** at the top of the Remote tab, a card shows what the TV is playing (a Web cast's page title, a YouTube video's title, or the app's name) with a bar you can drag to jump to a time. For Web casts the page's video moves and the TV follows; for YouTube, Playlet is sent the exact time. Other apps show their position but only have the skip buttons.
+- **Bookmarks and history:** in Browse, ☆ saves the page and ☰ opens your bookmarks and recent pages. They are kept on the PC (`%APPDATA%\RokuListen.phone.json`), so they are the same on every phone and survive reinstalling the home-screen app. History records the pages the Web tab visits (also from the PC) and has a Clear button.
+- **Cast from the Share menu:** on the Cast tab, "make Cast to TV appear in the Share menu" opens step-by-step instructions for an iOS Shortcut that sends the page you're sharing to the TV, from Safari, YouTube and most apps. (iOS doesn't let a home-screen web app appear in the Share menu by itself, so the one-time Shortcut is the way.)
+- **Follows your PC:** while the TV is following a page, every tab shows a "Watching" banner. When a cast starts on the PC (or you open the phone app mid-cast) the phone jumps to Browse on that page; the **Auto-open** switch in the banner turns this off. While casting, the Remote tab's play/pause and skip buttons also go through the page, so everything stays in sync.
+- **Cast:** paste a link. YouTube links go straight to Playlet on the TV; any other site is opened in the Web tab's ad-blocking browser on the PC and cast from there (so CapoCast must be running, and the video has to start by itself).
+- **Apps:** the Roku's apps, with their icons.
+
+Anyone holding the link can browse as your PC's Web tab (it is the same browser and profile), so treat the link like a password. It is off until you turn it on. Only devices on a private network can reach it, every request needs the secret in the link (use **Make a new link** to cut off old phones), and the phone can't send power keys. Windows may ask once to allow CapoCast on private networks. The link is plain HTTP on your home network, like the Roku's own remote protocol.
 
 ### Command-line client
 
@@ -245,7 +279,7 @@ python roku_listen.py --host 192.168.1.50 --delay-ms 300
 ```
 
 - **Audio:** the app authenticates to the Roku's ECP WebSocket the way the official mobile app does, then asks for the audio stream to be sent to the PC as RTP/Opus. It keeps the stream alive with RTCP receiver reports. FFmpeg decodes it to PCM, and the app applies volume and plays it.
-- **Web:** Brave runs headless (`--headless=new`, no window at all) with a private profile. The app drives it over the Chrome DevTools Protocol (`web_guard.py`): it streams the page as JPEG frames that `web_view.py` draws on a canvas and sends your mouse and keyboard back, closes pop-ups, stops scripted redirects, removes click traps, and records every video stream the page loads with the headers the browser used. `stream_finder.py` discards the decoys and ranks what's left. `media_relay.py` serves the winner to the Roku, replaying those headers and rewriting HLS and DASH manifests so every segment also comes through the PC, and RokuCast plays it. With Upscale on, `upscaler.py` has FFmpeg read the stream instead, run the chosen shader through libplacebo (Vulkan), encode HEVC with NVENC, and the relay serves those pieces as a finished HLS playlist that's filled in as the TV asks. Chrome-family browsers only allow remote debugging on a non-default profile, which is one reason the Web tab has its own. A new profile never downloads Brave's ad filters by itself, so they're copied in from your normal Brave profile on each launch (`brave_profile.py`).
+- **Web:** Brave runs headless (`--headless=new`, no window at all) with a private profile. The app drives it over the Chrome DevTools Protocol (`web_guard.py`): it streams the page as JPEG frames that `web_view.py` draws on a canvas and sends your mouse and keyboard back, closes pop-ups, stops scripted redirects, removes click traps, and records every video stream the page loads with the headers the browser used. `stream_finder.py` discards the decoys and ranks what's left. `media_relay.py` serves the winner to the Roku, replaying those headers and rewriting HLS and DASH manifests so every segment also comes through the PC, and RokuCast plays it. With Upscale or Subtitles on, `upscaler.py` has FFmpeg read the stream instead (`subtitles.py` fetches the chosen track and draws it with libass), run the chosen shader through libplacebo (Vulkan), encode HEVC with NVENC, and the relay serves those pieces as a finished HLS playlist that's filled in as the TV asks. Chrome-family browsers only allow remote debugging on a non-default profile, which is one reason the Web tab has its own. A new profile never downloads Brave's ad filters by itself, so they're copied in from your normal Brave profile on each launch (`brave_profile.py`).
 - **YouTube:** Chrome runs in app mode with your own profile and is re-parented into the app window. The extension watches the main YouTube player (never hover previews or ads) and reports events to the app over a local bridge that only the extension can use. The app mirrors those events to Playlet. Playlet seeks by reloading at a timestamp, which costs a 2–3 s rebuffer, so seeks are aimed ahead by a learned amount, and the muted PC player is then nudged onto the TV's timeline.
 
 ## Project structure
@@ -263,8 +297,11 @@ roku-listen/
 ├── stream_finder.py       # picks the real video out of the decoys (pure logic)
 ├── media_relay.py         # serves a stream to the Roku with the site's headers; HLS rewriting
 ├── tv_apps.py             # the quick app row: the Roku's app list and pinning (pure logic)
+├── phone_store.py         # bookmarks and history for the phone's Browse tab (a small JSON file)
+├── phone_remote.py        # phone remote: tiny LAN web server + the home-screen web app it serves (remote, browser, cast, apps)
 ├── discord_presence.py    # optional Discord status for what's on the TV (Web and YouTube)
-├── upscaler.py            # 4K upscaling on the PC's GPU (Anime4K, FSRCNNX), for the Web tab's casts
+├── upscaler.py            # 4K upscaling and subtitle burn-in on the PC's GPU, for the Web tab's casts
+├── subtitles.py           # finds a page's subtitle tracks and turns the chosen one into styled ASS
 ├── brave_profile.py       # the Web tab's private Brave profile and ad-filter seeding
 ├── drm.py                 # refuses DRM-protected sites and streams
 ├── tests/                 # unit tests, plus a hostile test site (guard_smoke.py)

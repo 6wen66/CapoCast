@@ -292,7 +292,7 @@ class LeftOverCast(Base):
         self.assertEqual(self.cleared, [])
 
     def test_while_the_page_is_being_followed_websync_is_in_charge(self):
-        self.tab.sync = SimpleNamespace(active=True)
+        self.tab.sync = SimpleNamespace(active=True, live=False, settle_until=0, offset=0, dur=0)
         for _ in range(4):
             self.tab.tv_state(self.HOME)
         self.assertEqual(self.cleared, [])
@@ -373,6 +373,7 @@ class YouTubeStatus(unittest.TestCase):
         calls = []
         discord = SimpleNamespace(showing="youtube", client_id="1", enabled={}, calls=calls,
                                   show=lambda *a, **k: calls.append(("show", a, k)), is_on=lambda s: True,
+                                  progress=lambda *a, **k: None,
                                   clear=lambda s: calls.append(("clear", s)))
         app = SimpleNamespace(discord=discord, _yt_since=0.0, _yt_gone=0, _yt_id=None, _yt_want=None)
         app._yt_show = lambda title, vid: g.App._yt_show(app, title, vid)

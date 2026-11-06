@@ -31,6 +31,8 @@ from PIL import Image, ImageOps, ImageTk
 import websockets
 
 import discord_presence
+import phone_remote
+import phone_store
 import tv_apps
 import web_tab
 import yt_embed
@@ -47,6 +49,7 @@ CHUNK = 960 * 4  # 20 ms of 48 kHz stereo s16le
 RR_EVERY = 1.0   # seconds between RTCP receiver reports; the Roku drops the stream if they're too sparse
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LOG = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RokuListen.log")
+PHONE_STORE = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RokuListen.phone.json")   # bookmarks, history
 PLAYLET_ID = tv_apps.PLAYLET_ID   # the Roku channel id of Playlet, which plays the YouTube tab's videos
 
 
@@ -149,18 +152,36 @@ class Remote:
                 "pos": ms("position"), "dur": ms("duration")}
 
     @classmethod
+    def playlet_now(cls, host):
+        """Playlet's now-playing entry ({videoid, title, ...}), or {}."""
+        try:
+            return json.loads(cls._open(f"http://{host}:8888/api/queue")).get("nowplaying") or {}
+        except Exception:
+            return {}
+
+    @classmethod
+    def _playlet_jump(cls, host, st, target):
+        """Restart Playlet's current video at `target` seconds. False if it isn't playing something seekable."""
+        vid = cls.playlet_now(host).get("videoid") if st and st["app"] == "Playlet" and st["dur"] > 0 else None
+        if not vid:
+            return False
+        body = json.dumps({"videoId": vid, "timestamp": int(max(0, min(target, st["dur"] - 2)))}).encode()
+        cls._open(f"http://{host}:8888/api/queue/play", data=body,
+                  headers={"Content-Type": "application/json", "X-Playlet": "1"})
+        return True
+
+    @classmethod
     def seek(cls, host, delta):
         st = cls.state(host)
-        if st and st["app"] == "Playlet" and st["dur"] > 0:
-            queue = json.loads(cls._open(f"http://{host}:8888/api/queue"))
-            vid = (queue.get("nowplaying") or {}).get("videoid")
-            if vid:
-                target = max(0, min(st["pos"] + delta, st["dur"] - 2))
-                body = json.dumps({"videoId": vid, "timestamp": int(target)}).encode()
-                cls._open(f"http://{host}:8888/api/queue/play", data=body,
-                          headers={"Content-Type": "application/json", "X-Playlet": "1"})
-                return
+        if st and cls._playlet_jump(host, st, st["pos"] + delta):
+            return
         cls.key(host, "Right" if delta > 0 else "Left")  # most other apps skip ~10s on the arrow keys
+
+    @classmethod
+    def seek_to(cls, host, target):
+        """Jump to an exact time (YouTube in Playlet only; other apps have no such command)."""
+        if not cls._playlet_jump(host, cls.state(host), target):
+            raise ValueError("This app can't jump to a time. Use the skip buttons.")
 
     @classmethod
     def cast(cls, host, video_id, timestamp=0, playlist_id=None):
@@ -1410,6 +1431,147 @@ class AppRow(tk.Frame):
         entry.focus_set()
 
 
+class PhoneBackend:
+    """What the phone page can do, in terms of this app. Runs on the phone server's threads, so anything that touches
+    the window is handed to the Tk thread."""
+
+    def __init__(self, app):
+        self.app, self._apps, self._apps_at, self._icons = app, [], 0.0, {}
+
+    def state(self):
+        app, web = self.app, self.app.web
+        vol = {"where": "pc", "level": app.pc_volume, "muted": False} if app.listener else               {"where": "tv", "level": app.tvvol.level, "muted": app.tvvol.muted}
+        note = web.phone_note()
+        return {"tv": app.last_tv, "now": self.now(app.last_tv), "volume": vol, "watching": web.phone_watching(),
+                "note": {"text": note[0], "ok": note[1]} if note else None}
+
+    def now(self, tv):
+        """What the TV is playing, for the phone's card: title, position and length in the video's own time."""
+        if not tv or tv["state"] == "none":
+            return None
+        web = self.app.web
+        watching, sync = web.phone_watching(), web.sync
+        if watching and sync:
+            off = sync.offset
+            dur = sync.dur or (tv["dur"] + off if tv["dur"] else 0)
+            title = watching["title"] or web.guard.snapshot()["title"] or "Web video"
+            return {"source": "web", "app": "Web", "title": title, "state": tv["state"], "pos": tv["pos"] + off,
+                    "dur": dur, "seekable": bool(dur) and not sync.live}
+        if tv["app"] == "Playlet":
+            return {"source": "youtube", "app": "YouTube", "title": self._playlet_title(), "state": tv["state"],
+                    "pos": tv["pos"], "dur": tv["dur"], "seekable": tv["dur"] > 0}
+        return {"source": "tv", "app": tv["app"] or "Roku", "title": tv["app"] or "Roku", "state": tv["state"],
+                "pos": tv["pos"], "dur": tv["dur"], "seekable": False}
+
+    def _playlet_title(self):
+        """The YouTube video's title: Playlet's own entry, else looked up by id. Cached so polling stays cheap."""
+        now = time.time()
+        cache = getattr(self, "_yt_cache", None)
+        if cache and now - cache[0] < 4:
+            return cache[1]
+        np = Remote.playlet_now(self.app._host)
+        title = np.get("title") or ""
+        vid = np.get("videoid") or ""
+        if not title and vid:
+            known = getattr(self, "_yt_titles", {})
+            if vid not in known:
+                try:
+                    known[vid] = discord_presence.youtube_info(vid)[1] or ""
+                except Exception:
+                    known[vid] = ""
+                self._yt_titles = known
+            title = known[vid]
+        self._yt_cache = (now, title or "YouTube")
+        return self._yt_cache[1]
+
+    def seek_to(self, t):
+        app, web = self.app, self.app.web
+        tv = app.last_tv
+        if web.phone_watching() and tv and web.sync:
+            return web.phone_transport("skip", t - (tv["pos"] + web.sync.offset))   # the page leads; the TV follows it
+        Remote.seek_to(app._host, t)
+
+    def key(self, name):
+        if name == "Play" and self.app.web.phone_watching():
+            return self.app.web.phone_transport("toggle")   # while casting, the page's video leads and the TV follows it
+        self.app.keys.key(name)                       # the same queue as typing, so order is kept
+
+    def text(self, s):
+        self.app.keys.text(s)
+
+    def seek(self, delta):
+        if self.app.web.phone_watching():
+            return self.app.web.phone_transport("skip", delta)
+        Remote.seek(self.app._host, delta)
+
+    def volume(self, step):
+        app = self.app
+        if app.listener:
+            app.after(0, lambda: app._phone_pc_volume(step * 5))
+        else:
+            for _ in range(abs(step)):
+                app.keys.key("VolumeUp" if step > 0 else "VolumeDown")
+
+    def launch(self, app_id):
+        Remote.launch(self.app._host, app_id)
+
+    def apps(self):
+        if time.time() - self._apps_at > 30 or not self._apps:
+            self._apps, self._apps_at = Remote.apps(self.app._host), time.time()
+        return self._apps
+
+    def icon(self, app_id):
+        if app_id not in self._icons:
+            self._icons[app_id] = Remote.icon(self.app._host, app_id)
+        return self._icons[app_id]
+
+    def cast(self, url):
+        yt = phone_remote.youtube_target(url)
+        if yt:
+            vid, playlist, start = yt
+            Remote.cast(self.app._host, vid, start, playlist)
+            return "Playing on the TV"
+        return self.app.web.cast_link(url)
+
+    # ---- the Browse tab: the Web tab's page, driven from the phone ----
+    def web_frame(self, after, w, h):
+        return self.app.web.phone_frame(after, w, h)
+
+    def web_info(self):
+        return self.app.web.phone_info()
+
+    def web_tap(self, x, y):
+        self.app.web.phone_tap(x, y)
+
+    def web_scroll(self, x, y, dx, dy):
+        self.app.web.phone_scroll(x, y, dx, dy)
+
+    def web_text(self, text):
+        self.app.web.phone_text(text)
+
+    def web_key(self, name):
+        self.app.web.phone_key(name)
+
+    def web_nav(self, action, url):
+        self.app.web.phone_nav(action, url)
+
+    def web_cast(self):
+        return self.app.web.phone_cast()
+
+    def web_transport(self, action, value):
+        self.app.web.phone_transport(action, value)
+
+    def web_pages(self):
+        return self.app.web.phone_pages()
+
+    def web_bookmark(self, action, url):
+        return self.app.web.phone_bookmark(action, url)
+
+    def stop_cast(self):
+        web = self.app.web
+        self.app.after(0, lambda: web.cancel_cast() if web.busy else web.stop_casting())
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1458,12 +1620,22 @@ class App(tk.Tk):
         self.pages = {"Listen": tk.Frame(body, bg=BG), "YouTube": tk.Frame(body, bg=BG), "Web": tk.Frame(body, bg=BG)}
         self._build_listen(self.pages["Listen"])
         self._build_youtube(self.pages["YouTube"])
+        self.phone_store = phone_store.PhoneStore(PHONE_STORE)
         ui = SimpleNamespace(BG=BG, CARD=CARD, EDGE=EDGE, FG=FG, MUTED=MUTED, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
                              GREEN=GREEN, AMBER=AMBER, RED=RED, GREY=GREY, FONT=FONT, FONT_MED=FONT_MED,
                              RoundButton=RoundButton, NavButton=NavButton, Remote=Remote, log=log)
-        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"), self.discord)
+        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"), self.discord,
+                                 subs=cfg.get("web_subs", ""))
         self.page = None
         self._show("YouTube" if "--youtube" in sys.argv else "Web" if "--web" in sys.argv else "Listen")
+
+        # the phone remote: off until you turn it on in the Phone remote window, then remembered
+        self.last_tv = None
+        self.phone_win = None
+        self.phone = phone_remote.PhoneRemote(PhoneBackend(self), cfg.get("phone_token") or phone_remote.new_token(),
+                                              self._phone_icon(), log=log)
+        if cfg.get("phone_on", False):
+            self._phone_start()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
         if "--autoconnect" in sys.argv:
@@ -1662,6 +1834,9 @@ class App(tk.Tk):
         self.out_lbl.pack(fill="x", ipady=5, pady=(3, 0))
         self.out_lbl.bind("<Button-1>", self._pick_output)
         self._paint_output()
+        phone = tk.Label(col, text="Phone remote", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
+        phone.pack(anchor="w", pady=(14, 0))
+        phone.bind("<Button-1>", lambda e: self.open_phone())
 
     def _build_youtube(self, page):
         self.yt_page = page
@@ -1781,6 +1956,8 @@ class App(tk.Tk):
             self._yt_gone = 0
             return
         gone = st["state"] == "none" or st.get("app") != "Playlet"
+        if not gone and st["state"] in ("play", "pause"):
+            self.discord.progress("youtube", st["pos"], st["dur"], st["state"] == "play")      # the clock follows the video
         self._yt_gone = self._yt_gone + 1 if gone else 0
         if self._yt_gone >= 2:
             self._yt_gone = 0
@@ -1828,6 +2005,7 @@ class App(tk.Tk):
 
     def _show_state(self, st):
         self._polling = False
+        self.last_tv = st
         fmt = lambda s: f"{int(s) // 60}:{int(s) % 60:02d}"
         if not st:
             self.play_state = "none"
@@ -1943,11 +2121,121 @@ class App(tk.Tk):
                            "quick_apps": getattr(getattr(self, "apps_row", None), "pins", None),
                            "web_home": getattr(getattr(self, "web", None), "home", None),
                            "web_upscale": getattr(getattr(self, "web", None), "upscale", "off"),
+                           "web_subs": getattr(getattr(self, "web", None), "subs", ""),
                            "discord_id": self.discord.client_id,
                            "discord_on": self.discord.enabled.get("web", False),
-                           "discord_youtube": self.discord.enabled.get("youtube", False)}, f)
+                           "discord_youtube": self.discord.enabled.get("youtube", False),
+                           "phone_on": self.phone.running if hasattr(self, "phone") else False,
+                           "phone_token": self.phone.token if hasattr(self, "phone") else ""}, f)
         except OSError:
             pass
+
+    # ---- phone remote ----------------------------------------------------------
+    @staticmethod
+    def _phone_icon():
+        try:
+            with open(asset("capocast.png"), "rb") as f:
+                return f.read()
+        except OSError:
+            return b""
+
+    def _phone_start(self):
+        try:
+            self.phone.start()
+            return True
+        except OSError as e:
+            log(f"phone remote failed to start: {e!r}")
+            return False
+
+    def _phone_pc_volume(self, delta):
+        """The phone's volume buttons while the sound is playing on this PC: nudge the same gain the slider controls."""
+        if not self.listener:
+            return
+        self.pc_volume = max(0, min(200, self.pc_volume + delta))
+        self.listener.volume = self.pc_volume / 100
+        self.scale.set(self.pc_volume)
+        self._refresh_volume()
+
+    def _phone_link(self):
+        try:
+            return self.phone.link(local_ip_for(self._host))
+        except OSError:
+            return self.phone.link("127.0.0.1")
+
+    def open_phone(self):
+        """The Phone remote window: the on/off switch, the link as a QR code, and how to put it on the home screen."""
+        if self.phone_win and self.phone_win.winfo_exists():
+            self.phone_win.lift()
+            return
+        import segno
+        win = self.phone_win = tk.Toplevel(self)
+        win.title("Phone remote")
+        win.configure(bg=BG)
+        win.transient(self)
+        win.resizable(False, False)
+        tk.Label(win, text="Phone remote", bg=BG, fg=FG, font=(FONT, 16, "bold")).pack(anchor="w", padx=24, pady=(20, 2))
+        tk.Label(win, text="Control the TV from your phone on the same Wi-Fi.\nFree, and no app store.", bg=BG, fg=MUTED,
+                 font=(FONT, 10), justify="left").pack(anchor="w", padx=24)
+        top = tk.Frame(win, bg=BG)
+        top.pack(fill="x", padx=24, pady=(14, 10))
+        state_var, link_var = tk.StringVar(), tk.StringVar()
+        tk.Label(top, textvariable=state_var, bg=BG, fg=FG, font=(FONT, 10, "bold")).pack(side="left")
+        entry = tk.Entry(win, textvariable=link_var, state="readonly", readonlybackground=CARD, fg=FG, relief="flat",
+                         font=(FONT, 9), highlightthickness=1, highlightbackground=EDGE)
+        qr_label = tk.Label(win, bg="#ffffff")
+        hint = tk.Label(win, bg=BG, fg=MUTED, font=(FONT, 10), justify="left", wraplength=340, anchor="w")
+
+        def paint():
+            if self.phone.running:
+                state_var.set("On")
+                link = self._phone_link()
+                link_var.set(link)
+                m = segno.make(link, error="m").matrix
+                n = len(m)
+                img = Image.new("L", (n + 8, n + 8), 255)             # 4-module quiet zone around the code
+                for y, row in enumerate(m):
+                    for x, v in enumerate(row):
+                        if v:
+                            img.putpixel((x + 4, y + 4), 0)
+                self._phone_qr = ImageTk.PhotoImage(img.resize((6 * (n + 8),) * 2, Image.NEAREST))
+                qr_label.config(image=self._phone_qr)
+                qr_label.pack(before=entry, pady=(0, 10))
+                hint.config(text="1. Scan the code with your iPhone's camera and open the link in Safari.\n"
+                                 "2. Tap Share, then Add to Home Screen.\n"
+                                 "3. Open CapoCast from your home screen.\n\n"
+                                 "If Windows asks, allow CapoCast on private networks.")
+            else:
+                state_var.set("Off")
+                link_var.set("")
+                qr_label.pack_forget()
+                hint.config(text="Turn it on to get a code to scan. Only devices on your home network can reach it, "
+                                 "and only with the link in the code.")
+
+        def flip(on):
+            if on:
+                if not self._phone_start():
+                    messagebox.showerror("Phone remote", "Couldn't start the phone remote: the network port is busy.",
+                                         parent=win)
+            else:
+                self.phone.stop()
+            paint()
+            self._save()
+
+        def reset(_e=None):
+            if not messagebox.askyesno("New link", "Make a new link? Phones using the old one stop working until they "
+                                       "scan the new code.", parent=win):
+                return
+            self.phone.token = phone_remote.new_token()
+            paint()
+            self._save()
+
+        Toggle(top, self.phone.running, flip).pack(side="right")
+        entry.pack(fill="x", padx=24, ipady=5)
+        hint.pack(fill="x", padx=24, pady=(12, 6))
+        new = tk.Label(win, text="Make a new link", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
+        new.pack(anchor="w", padx=24, pady=(0, 18))
+        new.bind("<Button-1>", reset)
+        paint()
 
     def _set_pins(self, pins):
         self._save()
@@ -2078,6 +2366,7 @@ class App(tk.Tk):
 
     def close(self):
         self._save()
+        self.phone.stop()
         self.kb_watch.stop()
         self.chrome.release()
         self.web.close()

@@ -153,6 +153,13 @@ def main():
         check("page video duration was learned", bool(d.best and 140 < d.best.duration < 160),
               str(d.best.duration if d.best else None))
 
+        # 7a. subtitles: the file the player fetched, and the <track> element that names it
+        files, dom = guard.subtitle_sources()
+        check("the subtitle file the player fetched is seen", any(f["url"].endswith("/en.vtt") for f in files), repr(files))
+        check("the video's <track> element is reported", any(t.get("label") == "English" for t in dom), repr(dom))
+        tracks = __import__("subtitles").build_tracks(files, dom)
+        check("they make one named track", [t["label"] for t in tracks] == ["English"], repr(tracks))
+
         # 7b. the thumbnail for Discord: the page's own preview image; none on a page that has neither
         check("page_image finds the page's og:image", guard.page_image(3.0) == "https://thumbs.example/decoy-ep1.jpg",
               repr(guard.page_image(3.0)))

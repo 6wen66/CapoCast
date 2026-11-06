@@ -9,6 +9,10 @@ the TV's own Left / Right jump just asks for a piece further on, which restarts 
 SEGMENT seconds of the video's own timeline, so a piece made by a restarted encoder fits the playlist exactly.
 
 Video and audio are separate tracks in fragmented MP4 (CMAF), the form Roku's streaming spec lists for HEVC over HLS.
+
+The same pipeline also burns subtitles into the picture: with `subs` the words are drawn onto each frame (after the
+upscale, so they stay sharp), and the "burn" mode does only that, at the video's own size, for casts that aren't being
+upscaled. The TV can't show a separate subtitle file, so this is how it gets any.
 """
 import math
 import os
@@ -33,6 +37,7 @@ JUMP = 6                # a request this far past the encoder is the TV's read-a
 WAIT = 25.0             # seconds the TV's request may wait for a piece
 SENT_EVERY = 8          # video pieces between notes in the log of how fast the TV is taking them
 OLD_DIRS = 86400        # a leftover work folder older than this came from a run that crashed
+BURN = "burn"           # subtitles only: no shader, the video's own size
 MODES = {"fast": "anime4k/anime4k_fast.glsl", "hq": "anime4k/anime4k_hq.glsl", "movie": "fsrcnnx/FSRCNNX_x2_16-0-4-1.glsl"}
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 QUIET_PRIORITY = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
@@ -40,16 +45,22 @@ DIR_PREFIX = "capocast-upscale-"
 PIECE = re.compile(r"^([va])(\d{5})\.m4s$")
 
 
+def font_source():
+    """The folder holding the fonts subtitles are drawn in (the same ones the app's own text uses)."""
+    return os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "assets")
+
+
 def shader_path(mode):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, "assets", *MODES[mode].split("/"))
 
 
-def missing():
-    """Why upscaling can't run on this PC, in plain words, or '' if it can."""
+def missing(mode="fast", subs=False):
+    """Why upscaling (or, with mode='burn', adding subtitles) can't run on this PC, in plain words, or '' if it can."""
+    what = "Subtitles need" if mode == BURN else "Upscaling needs"
     exe = shutil.which("ffmpeg")
     if not exe:
-        return "Upscaling needs FFmpeg on your PATH."
+        return f"{what} FFmpeg on your PATH."
 
     def listing(flag):
         try:
@@ -58,8 +69,11 @@ def missing():
         except Exception:
             return ""
 
-    if "libplacebo" not in listing("-filters"):
+    filters = listing("-filters")
+    if mode != BURN and "libplacebo" not in filters:
         return "This FFmpeg has no libplacebo. Install the full build: winget install Gyan.FFmpeg"
+    if (subs or mode == BURN) and " subtitles " not in filters:
+        return "This FFmpeg can't draw subtitles. Install the full build: winget install Gyan.FFmpeg"
     if "hevc_nvenc" not in listing("-encoders"):
         return "This FFmpeg has no NVIDIA encoder. Install the full build: winget install Gyan.FFmpeg"
     return ""
@@ -112,16 +126,28 @@ def _hls_output(prefix, first):
             f"{prefix}.m3u8"]
 
 
-def command(exe, url, headers, kind, first, audio):
-    """The FFmpeg command that makes pieces from number `first` on. It runs inside a folder next to shader.glsl, so
-    no Windows path has to survive FFmpeg's filter syntax."""
+def subtitle_filter(begin):
+    """Draws ../subs.ass onto the frames. The picture's clock restarts at 0 wherever the encoder starts, but the
+    subtitles are timed against the whole video, so the clock is moved forward for the drawing and back after."""
+    return f"setpts=PTS+{begin}/TB,subtitles=../subs.ass:fontsdir=../fonts,setpts=PTS-{begin}/TB"
+
+
+def command(exe, url, headers, kind, first, audio, mode="fast", subs=False):
+    """The FFmpeg command that makes pieces from number `first` on. It runs inside a folder next to shader.glsl (and
+    subs.ass and fonts/, when there are subtitles), so no Windows path has to survive FFmpeg's filter syntax."""
     begin = first * SEGMENT
     # -bf 0: B-frames would shift a stream that starts at 0:00 by a few frames against its audio, and against the
     # pieces of a restarted encoder, which don't get that shift.
-    picture = (f"format=yuv420p,hwupload,libplacebo=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
-               "force_divisible_by=2:format=nv12:custom_shader_path=../shader.glsl,hwdownload,format=nv12")
-    cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning",
-           "-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk",
+    if mode == BURN:
+        picture = (subtitle_filter(begin) + ",") * bool(subs) + "format=yuv420p"
+        device = []
+    else:
+        picture = (f"format=yuv420p,hwupload,libplacebo=w={TARGET_W}:h={TARGET_H}:force_original_aspect_ratio=decrease:"
+                   "force_divisible_by=2:format=nv12:custom_shader_path=../shader.glsl,hwdownload,format=nv12")
+        if subs:
+            picture += ",format=yuv420p," + subtitle_filter(begin)
+        device = ["-init_hw_device", "vulkan=vk:0", "-filter_hw_device", "vk"]
+    cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning", *device,
            *_input_options(headers, kind),
            "-reconnect", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5",
            "-readrate", str(READ_RATE), "-readrate_initial_burst", str(BURST), "-ss", str(begin), "-i", url,
@@ -139,14 +165,14 @@ def command(exe, url, headers, kind, first, audio):
     return cmd
 
 
-def master_playlist(audio):
+def master_playlist(audio, mode="fast"):
     group = ',AUDIO="a"' if audio else ""
+    size = "" if mode == BURN else f",RESOLUTION={TARGET_W}x{TARGET_H}"      # a subtitles-only cast keeps its own size
     codecs = "hvc1.1.6.L153.B0" + (",mp4a.40.2" if audio else "")
     lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-INDEPENDENT-SEGMENTS"]
     if audio:
         lines.append('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"')
-    lines += [f"#EXT-X-STREAM-INF:BANDWIDTH={MAX_BITRATE + AUDIO_BITRATE},CODECS=\"{codecs}\","
-              f"RESOLUTION={TARGET_W}x{TARGET_H}{group}", "video.m3u8"]
+    lines += [f"#EXT-X-STREAM-INF:BANDWIDTH={MAX_BITRATE + AUDIO_BITRATE},CODECS=\"{codecs}\"{size}{group}", "video.m3u8"]
     return "\n".join(lines) + "\n"
 
 
@@ -183,8 +209,9 @@ class UpscaleSession:
 
     kind, entry_name = "hls", "index.m3u8"
 
-    def __init__(self, url, headers, kind, token, start, duration, mode, audio, log=lambda m: None):
+    def __init__(self, url, headers, kind, token, start, duration, mode, audio, log=lambda m: None, subs=None):
         self.url, self.headers, self.source_kind, self.token = url, headers, kind, token
+        self.mode, self.subs = mode, bool(subs)
         self.duration, self.audio, self.log = float(duration), bool(audio), log
         self.start, self.actual_start = float(start or 0.0), (None if start else 0.0)
         self.created, self.hits, self.error, self.failures = time.time(), 0, "", []
@@ -200,7 +227,15 @@ class UpscaleSession:
         self._tidied = None
         self._cond = threading.Condition()
         self.dir = tempfile.mkdtemp(prefix=DIR_PREFIX)
-        shutil.copyfile(shader_path(mode), os.path.join(self.dir, "shader.glsl"))
+        if mode != BURN:
+            shutil.copyfile(shader_path(mode), os.path.join(self.dir, "shader.glsl"))
+        if subs:
+            shutil.copyfile(subs, os.path.join(self.dir, "subs.ass"))
+            fonts = os.path.join(self.dir, "fonts")
+            os.mkdir(fonts)
+            for name in os.listdir(font_source()):
+                if name.lower().endswith(".ttf"):
+                    shutil.copyfile(os.path.join(font_source(), name), os.path.join(fonts, name))
         with self._cond:
             self._start(self.first)
         threading.Thread(target=self._watch, name="upscale-watch", daemon=True).start()
@@ -209,7 +244,7 @@ class UpscaleSession:
     def playlist(self, name):
         """Text of a playlist this session serves, or None if `name` isn't one."""
         if name == self.entry_name:
-            return master_playlist(self.audio)
+            return master_playlist(self.audio, self.mode)
         if name == "video.m3u8":
             return media_playlist("v", self.duration)
         if name == "audio.m3u8" and self.audio:
@@ -290,7 +325,8 @@ class UpscaleSession:
         self.run_first, self.reached, self._pace = first, first, None
         self.log(f"upscale: encoding from {first * SEGMENT}s")
         with open(os.path.join(run, "ffmpeg.log"), "wb") as err:
-            self.proc = subprocess.Popen(command(exe, self.url, self.headers, self.source_kind, first, self.audio),
+            self.proc = subprocess.Popen(command(exe, self.url, self.headers, self.source_kind, first, self.audio,
+                                                   self.mode, self.subs),
                                          cwd=run, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
                                          creationflags=NO_WINDOW | QUIET_PRIORITY)
 

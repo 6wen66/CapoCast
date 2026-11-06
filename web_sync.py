@@ -36,6 +36,7 @@ class WebSync:
         self.offset = 0.0               # TV position + offset = position in the video
         self.settle_until = 0.0
         self.title = ""
+        self.started_at = 0.0
         self._thread = None
 
     # ---- lifecycle -----------------------------------------------------------
@@ -51,7 +52,8 @@ class WebSync:
         self.live = bool(cand.live)
         self.offset, self.title = float(offset or 0), title
         self.epoch0 = self.guard.epoch
-        self.settle_until = time.time() + self.SETTLE
+        self.started_at = time.time()
+        self.settle_until = self.started_at + self.SETTLE
         self.tv_seen = 0.0              # the furthest into the video the TV has been seen
         self.last_check = self.last_mirror = self.last_alive = time.time()
         self._seek_at = None            # (target, when) of the last seek we acted on

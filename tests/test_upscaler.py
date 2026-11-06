@@ -462,7 +462,7 @@ class Tab(unittest.TestCase):
         tab.ui = SimpleNamespace(log=lambda m: None, AMBER="a", MUTED="m", GREEN="g", ACCENT="acc")
         tab._note = lambda text, *a: self.notes.append(text)
         tab.upscale, tab.upscaled, tab.attempt = "fast", None, 1
-        for p in (mock.patch.object(upscaler, "missing", lambda: ""),):
+        for p in (mock.patch.object(upscaler, "missing", lambda *a: ""),):
             p.start()
             self.addCleanup(p.stop)
 
@@ -478,13 +478,13 @@ class Tab(unittest.TestCase):
     def test_a_normal_video_gets_a_plan_with_no_extra_probe(self):
         with mock.patch.object(upscaler, "probe", side_effect=AssertionError("no need to probe")):
             plan = self.tab._upscale_plan(self.cand())
-        self.assertEqual(plan, {"mode": "fast", "duration": 1400.0, "audio": True})
+        self.assertEqual(plan, {"mode": "fast", "duration": 1400.0, "audio": True, "subs": None})
 
     def test_what_the_page_didnt_say_is_probed_for(self):
         info = {"duration": 90.0, "height": 720, "audio": False, "video": True}
         with mock.patch.object(upscaler, "probe", return_value=info):
             plan = self.tab._upscale_plan(self.cand(kind="mp4", duration=0.0, height=0, has_audio=None))
-        self.assertEqual(plan, {"mode": "fast", "duration": 90.0, "audio": False})
+        self.assertEqual(plan, {"mode": "fast", "duration": 90.0, "audio": False, "subs": None})
 
     def test_skipping_always_says_why(self):
         for cand, words in ((self.cand(live=True), "Live"), (self.cand(height=2160), "already 4K"),
@@ -499,7 +499,7 @@ class Tab(unittest.TestCase):
         self.assertIn("length", self.notes[-1])
 
     def test_a_pc_that_cant_do_it_says_so(self):
-        with mock.patch.object(upscaler, "missing", lambda: "needs FFmpeg"):
+        with mock.patch.object(upscaler, "missing", lambda *a: "needs FFmpeg"):
             self.assertIsNone(self.tab._upscale_plan(self.cand()))
         self.assertIn("needs FFmpeg", self.notes[-1])
 
@@ -533,7 +533,7 @@ class Tab(unittest.TestCase):
         self.tab._ensure_relay = lambda host: relay
         self.tab.app._host = "h"
         self.assertEqual(self.tab._relay_add("https://c/x.mp4", {}, "mp4", 30.0), ("u", "sess"))
-        self.assertEqual(calls, [("https://c/x.mp4", {}, "mp4", 30.0, 100.0, "hq", True)])
+        self.assertEqual(calls, [("https://c/x.mp4", {}, "mp4", 30.0, 100.0, "hq", True, None)])
         self.assertEqual(plan["session"], "sess")                     # the stall warning follows the new stream
 
     def test_what_the_label_steps_through_is_remembered(self):
@@ -553,7 +553,7 @@ class Tab(unittest.TestCase):
     def test_the_label_wont_turn_on_a_pc_that_cant_do_it(self):
         self.tab.upscale, self.tab.app._save = "off", lambda: None
         self.tab.upscale_lbl = SimpleNamespace(config=lambda **k: None)
-        with mock.patch.object(upscaler, "missing", lambda: "needs FFmpeg"):
+        with mock.patch.object(upscaler, "missing", lambda *a: "needs FFmpeg"):
             self.tab.next_upscale()
         self.assertEqual(self.tab.upscale, "off")
         self.assertIn("needs FFmpeg", self.notes[-1])
