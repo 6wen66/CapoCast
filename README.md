@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/youtube.png" width="72" alt="">
+<img src="assets/capocast.png" width="72" alt="">
 
 # CapoCast
 
@@ -67,6 +67,8 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | 🌐 **Web tab** | Browse any site in a private, windowless Brave (the app draws the page itself), then cast the video on the page to the TV (HLS, DASH and MP4). Pause, play and scrubbing on the page follow on the TV |
 | 🛡️ **Pop-up and trap protection** | Closes pop-ups and pop-unders, stops scripted cross-site redirects, removes invisible click-trap layers, denies downloads and notification prompts. Brave's Shields block the ad requests themselves |
 | ✨ **4K upscaling for the TV** | Your PC sharpens Web tab casts to 4K as they play, with Anime4K for anime or FSRCNNX for live action, and the TV just plays the result (needs an NVIDIA GPU) |
+| 🚀 **Quick apps** | Tiles under the remote that open an app on the TV in one click. Playlet is there from the start; **All apps** lists everything on your Roku, and you can pin up to five |
+| 🔈 **Choose where the sound goes** | An **Output** menu on the Listen tab picks the PC's sound device, and it switches while connected. If the device disappears, CapoCast keeps trying for 30 s before giving up |
 | 🎭 **Decoy filter** | Ignores ad clips, previews, thumbnails and loose segments, and picks the long video from the frame that's actually playing. If two streams look alike, it asks you |
 
 <img src="docs/screenshots/listen-tab.png" width="640" alt="CapoCast Listen tab">
@@ -112,10 +114,11 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 
 1. Enter your Roku's IP (it's saved for next time) and click **Connect**. The TV's speakers mute and the audio plays on your PC.
 2. **Volume** follows wherever the sound is going, and switches by itself. While you're connected (the sound plays on this PC) it's the PC volume, **0–200 %**, where everything above 100 % is a boost. While you're not connected (the sound plays on the TV) it's the **TV's own volume**, 0–100. Dragging it steps the TV up or down, it follows the TV live if you use the physical remote, and a **Mute** switch appears. The Roku can't be asked for its volume, so it shows **—** until the TV first reports one, which happens on your first change.
-3. **Delay ms** sets the Roku-side buffer. Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles.
-4. The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button. The **Remote** column beside them has the remote's arrows and **OK** as square buttons. Holding an arrow repeats it.
-5. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
-6. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, selects the Type box (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the app goes back to the tab you were on. You can also start typing anywhere on the Listen tab without clicking the box first.
+3. **Delay ms** sets the Roku-side buffer. Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles. **Output** picks which sound device plays the TV's audio and applies at once while connected; "System default" follows Windows. If the sound stops arriving, the status changes to **No audio from the Roku** and goes back when it returns.
+4. **Apps** (under the remote) are one-click tiles that open an app on the TV. Playlet is there to start with. **All apps** lists everything on your Roku, where you can open an app or pin up to five to the tiles; right-click a tile to unpin it.
+5. The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button. The **Remote** column beside them has the remote's arrows and **OK** as square buttons. Holding an arrow repeats it.
+6. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
+7. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, selects the Type box (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the app goes back to the tab you were on. You can also start typing anywhere on the Listen tab without clicking the box first.
 
 ### YouTube tab
 
@@ -134,7 +137,7 @@ The status next to the switch shows the link state: **Ready**, **On TV · \<titl
 
 ### Web tab
 
-<img src="docs/screenshots/web-tab.png" width="820" alt="CapoCast Web tab on the repo's hostile test page: the status line shows a pop-up blocked and a click trap removed">
+<img src="docs/screenshots/web-tab.png" width="820" alt="CapoCast Web tab on the repo's hostile test page: the status line shows a click trap removed and the video streams found">
 
 *The Web tab on the repo's own test page (`tests/decoy_site.py`), which is full of traps. The status line shows what was stopped.*
 
@@ -199,6 +202,23 @@ A Roku can't run shaders, so your PC does the work while you watch, and the TV p
 
 Live streams, videos already in 4K and videos of unknown length are cast as they are, and if the upscaler can't start the cast carries on without it. Either way the status line tells you.
 
+#### Discord status
+
+**Discord** shows what's on your TV as your Discord status: the title, a thumbnail of what you're watching, how long you've been watching, and whether it's being upscaled. There are two switches, both **off** until you turn them on:
+
+- **Web tab:** **Discord** (right of the status line). The first line is what you're watching, taken from the page's title with the site's name and filler like "Watch … English Sub Online" removed. The second line names the site ("on Miruro", plus the upscaling if it's on). The picture is the page's own preview image (or the video's poster); a site's logo is skipped in favour of the poster. Not every site has one.
+- **YouTube tab:** **Discord**, beside Auto-cast in the top bar. It shows the video's title and thumbnail.
+
+Either way, your status shows the title to anyone who can see it, and the most recent thing you started is what's shown.
+
+Discord only shows a status for an app you've registered, so the first time you click it CapoCast asks for an Application ID:
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and press **New Application**.
+2. Name it what you want to see after "Playing" (for example `CapoCast`).
+3. Copy the **Application ID** from the General Information page and paste it into CapoCast.
+
+The text is sent only to the Discord app on your PC, over its local connection. The thumbnail is sent as a web address, so Discord (and the people who see your status) fetch that picture from the site or YouTube themselves. If Discord refuses the picture, the text is shown without it. The status clears when the cast ends, the TV leaves it, or you turn the switch off, and it needs the Discord desktop app to be open.
+
 ### Command-line client
 
 For a minimal, audio-only setup without the GUI:
@@ -242,6 +262,8 @@ roku-listen/
 ├── web_guard.py           # DevTools guard: pop-ups, redirects, click traps, stream capture, screencast
 ├── stream_finder.py       # picks the real video out of the decoys (pure logic)
 ├── media_relay.py         # serves a stream to the Roku with the site's headers; HLS rewriting
+├── tv_apps.py             # the quick app row: the Roku's app list and pinning (pure logic)
+├── discord_presence.py    # optional Discord status for what's on the TV (Web and YouTube)
 ├── upscaler.py            # 4K upscaling on the PC's GPU (Anime4K, FSRCNNX), for the Web tab's casts
 ├── brave_profile.py       # the Web tab's private Brave profile and ad-filter seeding
 ├── drm.py                 # refuses DRM-protected sites and streams
@@ -267,6 +289,9 @@ roku-listen/
 | Remote buttons or **Type on TV** do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
 | Connected but no sound | Allow CapoCast through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
 | Crackling audio | Raise **Delay ms** (try 500–700). |
+| Status says **No audio from the Roku** | The TV stopped sending sound (it may be off, or on an input that has none). It recovers by itself when sound returns. Once a minute the log has an `rtp:` line counting packets that never arrived. |
+| Status says **Audio device lost, reconnecting…** | The sound device went away (unplugged, or a driver reset). CapoCast retries for 30 s; pick another device in **Output** if it doesn't come back. |
+| The Apps tiles show names, not pictures | The Roku wasn't reachable yet. They fill in by themselves and retry every 30 s. |
 | Web tab says **Ad filters missing** | Open Brave normally once so it downloads its filters, then reopen the Web tab (or restart the app). |
 | Web tab says **The TV never asked this PC for the video** | Allow CapoCast (or Python) through Windows Firewall on **private networks**; the Roku connects to TCP 8766–8770. Also check the Roku IP on the Listen tab. |
 | Web tab says **No video found yet** | Press play on the video first, then Cast. For pages whose video can't be seen, install [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`winget install yt-dlp.yt-dlp`) and Cast tries that as a fallback. |

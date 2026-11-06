@@ -6,6 +6,7 @@ scaled by the volume slider in Python (audioop) and played with sounddevice, so 
 import asyncio
 import base64
 import ctypes
+import io
 import audioop
 import json
 import os
@@ -23,12 +24,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 import sounddevice as sd
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 import websockets
 
+import discord_presence
+import tv_apps
 import web_tab
 import yt_embed
 from types import SimpleNamespace
@@ -44,7 +47,7 @@ CHUNK = 960 * 4  # 20 ms of 48 kHz stereo s16le
 RR_EVERY = 1.0   # seconds between RTCP receiver reports; the Roku drops the stream if they're too sparse
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LOG = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "RokuListen.log")
-PLAYLET_ID = "693751"   # the Roku channel id of Playlet, which plays the YouTube tab's videos
+PLAYLET_ID = tv_apps.PLAYLET_ID   # the Roku channel id of Playlet, which plays the YouTube tab's videos
 
 
 def log(msg):
@@ -53,6 +56,68 @@ def log(msg):
             f.write(f"{time.strftime('%H:%M:%S')} {msg}" + chr(10))
     except OSError:
         pass
+
+
+SILENCE_AFTER = 3.0     # seconds without audio packets before the status says so
+DEVICE_RETRY = 30.0     # seconds to keep trying to reopen a lost audio output before giving up
+
+
+def output_devices():
+    """Names of the sound outputs, de-duplicated (Windows lists each device once per audio API)."""
+    try:
+        seen = []
+        for d in sd.query_devices():
+            if d["max_output_channels"] > 0 and d["name"] not in seen:
+                seen.append(d["name"])
+        return seen
+    except Exception:
+        return []
+
+
+def find_output_device(name):
+    """sounddevice index of the output called `name`, or None (system default) if unset or not present."""
+    if not name:
+        return None
+    try:
+        default = sd.default.hostapi
+        match = [i for i, d in enumerate(sd.query_devices()) if d["max_output_channels"] > 0 and d["name"] == name]
+        return next((i for i in match if sd.query_devices(i)["hostapi"] == default), match[0] if match else None)
+    except Exception:
+        return None
+
+
+class RtpStats:
+    """Counts what actually arrives from the Roku, by RTP sequence number, so a dropout can be told apart as lost on
+    the network (gaps here too) or lost after it reached this app (gaps only in FFmpeg's log)."""
+
+    def __init__(self):
+        self.last = None
+        self.reset()
+
+    def reset(self):
+        self.packets = self.lost = self.gaps = self.reordered = 0
+        self.longest_pause, self._at = 0.0, None
+
+    def packet(self, seq, now):
+        self.packets += 1
+        if self._at is not None:
+            self.longest_pause = max(self.longest_pause, now - self._at)
+        self._at = now
+        if self.last is not None:
+            step = (seq - self.last) & 0xFFFF
+            if step == 0 or step > 0x8000:
+                self.reordered += 1
+                return
+            if step > 1:
+                self.lost += step - 1
+                self.gaps += 1
+        self.last = seq
+
+    def report(self):
+        text = (f"rtp: {self.packets} packets, {self.lost} missing in {self.gaps} gaps, {self.reordered} late/duplicate, "
+                f"longest pause {self.longest_pause * 1000:.0f} ms")
+        self.reset()
+        return text
 
 
 class Remote:
@@ -155,6 +220,20 @@ class Remote:
             raise RuntimeError(f"The Roku answered HTTP {e.code}.")
         except OSError as e:
             raise RuntimeError(f"Couldn't reach the Roku at {host}: {e}")
+
+    @classmethod
+    def apps(cls, host):
+        """[{'id', 'name'}] of the apps installed on the Roku."""
+        return tv_apps.parse_apps(cls._open(f"http://{host}:{ECP_PORT}/query/apps", timeout=4))
+
+    @classmethod
+    def icon(cls, host, app_id):
+        """The app's picture (PNG bytes) as the Roku's own home screen draws it."""
+        return cls._open(f"http://{host}:{ECP_PORT}/query/icon/{urllib.parse.quote(app_id, safe='')}", timeout=4)
+
+    @classmethod
+    def launch(cls, host, app_id):
+        cls._open(f"http://{host}:{ECP_PORT}/launch/{urllib.parse.quote(app_id, safe='')}", data=b"", timeout=6)
 
     @classmethod
     def close_player(cls, host):
@@ -285,8 +364,9 @@ class CastSync:
     RECHECK = 20.0  # seconds between drift checks while both are playing
     APPLY = 0.3     # a nudge reaches the page on its next poll (every 250 ms)
 
-    def __init__(self, host_fn, bridge):
+    def __init__(self, host_fn, bridge, on_now=None):
         self.host_fn, self.bridge = host_fn, bridge
+        self.on_now = on_now         # called with (title, video id) when a video starts on the TV, (None, None) when it ends
         self.q = queue.Queue()
         self.title, self.error = "", ""
         self.settle_until = 0.0
@@ -333,6 +413,7 @@ class CastSync:
             t0 = time.time()
             Remote.cast(host, ev["id"], ev.get("t", 0), ev.get("list"))
             self.title, self.current = ev.get("title") or ev["id"], ev["id"]
+            self._announce(self.title, self.current)
             self.settle_until = t0 + self.SETTLE
             if self._started(host, ev.get("t", 0), t0):
                 self._align(host)
@@ -358,6 +439,14 @@ class CastSync:
         elif kind == "leave":
             Remote.close_player(host)   # Playlet closes its player and shows its home screen
             self.title, self.current = "", None
+            self._announce(None, None)
+
+    def _announce(self, title, video_id):
+        if self.on_now:
+            try:
+                self.on_now(title, video_id)
+            except Exception as e:
+                log(f"on_now failed: {e!r}")
 
     def _started(self, host, target, t0):
         """Wait (abandoning it if a newer event arrives) until the TV is really playing near target; learn the lead."""
@@ -483,6 +572,7 @@ class Listener:
     def __init__(self, host, delay_ms, on_status):
         self.host, self.delay_us, self.on_status = host, delay_ms * 1000, on_status
         self.volume = 1.0
+        self.device, self.reopen = "", False   # output device name ('' = system default); reopen: switch it live
         self.stop_evt = threading.Event()
         self.threads, self.sock, self.proc, self.sdp_path, self.loop = [], None, None, None, None
         self.ws_task, self.failed = None, False
@@ -547,49 +637,113 @@ class Listener:
         roku = (self.host, RTCP_PORT)
         self.sock.settimeout(0.5)
         started, last_rr, last_pkt, count = False, 0.0, time.monotonic(), 0
+        silent = False
+        stats = RtpStats()
+        last_report = time.monotonic()
+
+        def send(data, addr, sock=self.sock):
+            # Windows reports an earlier send to a closed port as an error on the next receive, and a send can fail
+            # while the network blips. Neither is a reason to stop listening.
+            try:
+                sock.sendto(data, addr)
+            except OSError as e:
+                if not self.stop_evt.is_set():
+                    log(f"rtp send failed: {e!r}")
+
         while not self.stop_evt.is_set():
             now = time.monotonic()
             # Keep the Roku's keepalive satisfied on a timer (not only when packets arrive).
             if started and now - last_rr >= RR_EVERY:
-                self.sock.sendto(RTCP_RR, roku)
+                send(RTCP_RR, roku)
                 last_rr = now
+            if started and now - last_report >= 60:
+                last_report = now
+                log(stats.report())
             try:
                 data, _ = self.sock.recvfrom(2048)
             except socket.timeout:
                 if started and now - last_pkt > 1.5:
                     log(f"no RTP for {now - last_pkt:.1f}s (packets so far: {count})")
+                if started and not silent and now - last_pkt > SILENCE_AFTER:
+                    silent = True
+                    self.on_status("No audio from the Roku")
                 continue
+            except ConnectionResetError:
+                continue                       # see send(): not a real failure
             except OSError:
-                break
+                if self.stop_evt.is_set():
+                    break
+                time.sleep(0.05)               # the socket itself is gone only when stop() closed it
+                continue
             if len(data) < 12 or data[0] >> 6 != 2:
                 continue
             last_pkt, count = time.monotonic(), count + 1
-            fwd.sendto(data, ("127.0.0.1", FFPLAY_PORT))
+            stats.packet(int.from_bytes(data[2:4], "big"), last_pkt)
+            try:
+                fwd.sendto(data, ("127.0.0.1", FFPLAY_PORT))
+            except OSError:
+                pass
+            if silent:
+                silent = False
+                self.on_status("Connected - playing")
             if not started:
                 started = True
-                self.sock.sendto(rtcp_app(b"VDLY", self.delay_us), roku)
-                self.sock.sendto(rtcp_app(b"CVER", 808464434), roku)
-                self.sock.sendto(RTCP_RR, roku)
+                send(rtcp_app(b"VDLY", self.delay_us), roku)
+                send(rtcp_app(b"CVER", 808464434), roku)
+                send(RTCP_RR, roku)
                 last_rr = time.monotonic()
                 log("first RTP packet received")
                 self.on_status("Connected - playing")
 
     def _audio_loop(self):
+        """Decoded audio to the speakers. If the output device goes away (unplugged, driver reset, a sleep/wake) it
+        is reopened for up to DEVICE_RETRY seconds instead of ending the session."""
+        gave_up_at = None
+        while not self.stop_evt.is_set():
+            try:
+                with sd.RawOutputStream(samplerate=48000, channels=2, dtype="int16", blocksize=960, latency="low",
+                                        device=self.device_index()) as out:
+                    gave_up_at = None
+                    self.reopen = False
+                    while not self.stop_evt.is_set() and not self.reopen:
+                        buf = self.proc.stdout.read(CHUNK)
+                        if not buf:
+                            if not self.stop_evt.is_set():
+                                log(f"ffmpeg exited rc={self.proc.poll()}")
+                                self._fail("Audio decoder stopped - see RokuListen.log in %APPDATA%")
+                            return
+                        v = self.volume
+                        out.write(buf if v == 1.0 else audioop.mul(buf, 2, v))
+                if self.reopen:
+                    log("audio: switching output device")
+                    continue
+            except Exception as e:
+                if self.stop_evt.is_set():
+                    return
+                gave_up_at = gave_up_at or time.monotonic() + DEVICE_RETRY
+                if time.monotonic() > gave_up_at:
+                    log(f"audio error: {e!r}")
+                    self._fail(f"Audio error: {e}")
+                    return
+                log(f"audio device problem, retrying: {e!r}")
+                self.on_status("Audio device lost, reconnecting…")
+                self._rescan_devices()
+                self.stop_evt.wait(1.5)
+                if not self.stop_evt.is_set():
+                    self.on_status("Connected - playing")
+
+    def device_index(self):
+        """The saved output device's index, or None for the system default (also when it isn't plugged in now)."""
+        return find_output_device(self.device)
+
+    @staticmethod
+    def _rescan_devices():
+        """PortAudio only lists the devices present when it started; restart it so a reconnected one is seen."""
         try:
-            with sd.RawOutputStream(samplerate=48000, channels=2, dtype="int16", blocksize=960, latency="low") as out:
-                while not self.stop_evt.is_set():
-                    buf = self.proc.stdout.read(CHUNK)
-                    if not buf:
-                        if not self.stop_evt.is_set():
-                            log(f"ffmpeg exited rc={self.proc.poll()}")
-                            self._fail("Audio decoder stopped - see RokuListen.log in %APPDATA%")
-                        break
-                    v = self.volume
-                    out.write(buf if v == 1.0 else audioop.mul(buf, 2, v))
+            sd._terminate()
+            sd._initialize()
         except Exception as e:
-            if not self.stop_evt.is_set():
-                log(f"audio error: {e!r}")
-                self._fail(f"Audio error: {e}")
+            log(f"audio rescan failed: {e!r}")
 
     def _ws_thread(self):
         self.loop = asyncio.new_event_loop()
@@ -1035,6 +1189,227 @@ class NavButton(tk.Canvas):
             self.create_polygon(c + 3, c - 10, c + 8, c - 5, c + 2, c - 3, fill=col, outline="")
 
 
+class AppTile(tk.Canvas):
+    """One quick-launch tile: the app's picture (or its name until the picture arrives). Click opens it on the TV,
+    right-click offers to unpin it."""
+
+    W, H = 85, 56
+
+    def __init__(self, parent, label, command, image=None, on_menu=None, accent=False):
+        super().__init__(parent, width=self.W, height=self.H, bg=BG, highlightthickness=0, cursor="hand2")
+        self.label, self.command, self.image, self.on_menu, self.accent, self.hot = label, command, image, on_menu, accent, False
+        self.bind("<Enter>", lambda e: self._hot(True))
+        self.bind("<Leave>", lambda e: self._hot(False))
+        self.bind("<Button-1>", lambda e: self.command())
+        if on_menu:
+            self.bind("<Button-3>", lambda e: self.on_menu(e))
+        self.draw()
+
+    def _hot(self, on):
+        self.hot = on
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        rounded(self, 1, 1, self.W - 1, self.H - 1, 12, fill="#26262b" if self.hot else CARD,
+                outline=ACCENT if self.hot else EDGE)
+        if self.image is not None:
+            self.create_image(self.W / 2, self.H / 2, image=self.image)
+        else:
+            self.create_text(self.W / 2, self.H / 2, text=self.label, fill=ACCENT_HI if self.accent else FG,
+                             font=(FONT_MED, 9), width=self.W - 14, justify="center")
+
+
+class AppRow(tk.Frame):
+    """Pinned apps in two columns under the remote, plus an "All apps" tile for the rest of what the Roku has.
+
+    Everything slow (the app list, the pictures, launching) runs on a thread; Tk objects are only made on the Tk thread."""
+
+    GAP, VGAP, RETRY = 8, 6, 30.0     # gaps between tiles across and down; seconds between retries
+
+    def __init__(self, parent, pins, on_pins, host_fn, log=lambda m: None):
+        super().__init__(parent, bg=BG)
+        self.pins, self.on_pins, self.host_fn, self.log = list(pins), on_pins, host_fn, log
+        self.apps, self._raw, self._pics = [], {}, {}
+        self._host, self._tried, self._busy = None, 0.0, False
+        self.grid_box = tk.Frame(self, bg=BG)
+        self.grid_box.pack(anchor="w")
+        self.hint = tk.Label(self, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
+        self.hint.pack(fill="x", pady=(6, 0))
+        self._hint_job = None
+        self.render()
+
+    # ---- drawing -----------------------------------------------------------------
+    def render(self):
+        for w in self.grid_box.winfo_children():
+            w.destroy()
+        tiles = []
+        for app_id in self.pins:
+            name = tv_apps.name_for(self.apps, app_id)
+            tiles.append(AppTile(self.grid_box, name, lambda a=app_id: self.launch(a), self._pics.get(app_id),
+                                 on_menu=lambda e, a=app_id: self._menu(e, a)))
+        tiles.append(AppTile(self.grid_box, "All apps", self.open_all, accent=True))
+        for i, tile in enumerate(tiles):
+            tile.grid(row=i // 2, column=i % 2, padx=(0 if i % 2 == 0 else self.GAP, 0),
+                      pady=(0 if i < 2 else self.VGAP, 0))
+
+    def say(self, text, color=MUTED, seconds=4):
+        self.hint.config(text=text, fg=color)
+        if self._hint_job:
+            self.after_cancel(self._hint_job)
+        self._hint_job = self.after(int(seconds * 1000), lambda: self.hint.config(text=""))
+
+    def _menu(self, e, app_id):
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=FG, activebackground=ACCENT, activeforeground="#ffffff", bd=0)
+        menu.add_command(label="Unpin", command=lambda: self.toggle(app_id))
+        try:
+            menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            menu.grab_release()
+
+    # ---- loading -------------------------------------------------------------------
+    def tick(self, host):
+        """Called every second: load the list when the Roku's address changes, and keep trying while it's unreachable."""
+        if self._busy:
+            return
+        if host != self._host or (not self.apps and time.time() - self._tried > self.RETRY):
+            self._host, self._tried, self._busy = host, time.time(), True
+            threading.Thread(target=self._fetch, args=(host,), daemon=True).start()
+
+    def _after(self, fn):
+        try:
+            self.after(0, fn)
+        except (RuntimeError, tk.TclError):         # window already closed
+            pass
+
+    def _fetch(self, host):
+        apps, raw = [], {}
+        try:
+            apps = Remote.apps(host)
+            for app_id in self.pins:
+                raw[app_id] = self._icon(host, app_id)
+        except Exception as e:
+            self.log(f"app list: {e!r}")
+        self._after(lambda: self._loaded(host, apps, raw))
+
+    @staticmethod
+    def _icon(host, app_id):
+        try:
+            return Remote.icon(host, app_id)
+        except Exception:
+            return None
+
+    def _loaded(self, host, apps, raw):
+        self._busy = False
+        if host != self._host:
+            return
+        if apps:
+            self.apps = apps
+        for app_id, data in raw.items():
+            if data:
+                self._raw[app_id] = data
+        self._make_pictures()
+        self.render()
+
+    def _make_pictures(self):
+        for app_id, data in self._raw.items():
+            if app_id in self._pics:
+                continue
+            try:
+                im = ImageOps.fit(Image.open(io.BytesIO(data)).convert("RGBA"), (AppTile.W - 4, AppTile.H - 4),
+                                  Image.LANCZOS)
+                self._pics[app_id] = ImageTk.PhotoImage(im)
+            except Exception as e:
+                self.log(f"app picture {app_id}: {e!r}")
+
+    # ---- actions -------------------------------------------------------------------
+    def launch(self, app_id):
+        host, name = self.host_fn(), tv_apps.name_for(self.apps, app_id)
+        self.say(f"Opening {name}…")
+
+        def work():
+            try:
+                Remote.launch(host, app_id)
+            except Exception as e:
+                self.log(f"launch {app_id} failed: {e!r}")
+                self._after(lambda: self.say(f"Couldn't open {name}: is the Roku reachable?", RED, 6))
+        threading.Thread(target=work, daemon=True).start()
+
+    def toggle(self, app_id):
+        self.pins, what = tv_apps.toggle_pin(self.pins, app_id)
+        if what == "full":
+            return self.say(f"{tv_apps.MAX_PINS} apps is the most: unpin one first", AMBER, 5)
+        self.on_pins(self.pins)
+        if what == "pinned" and app_id not in self._raw:
+            host = self.host_fn()
+
+            def work():
+                data = self._icon(host, app_id)
+                self._after(lambda: self._loaded(host, [], {app_id: data}))
+            threading.Thread(target=work, daemon=True).start()
+        self.render()
+
+    def open_all(self):
+        """A list of everything on the Roku, to open an app or pin it to the tiles."""
+        win = tk.Toplevel(self)
+        win.title("Roku apps")
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        win.geometry("340x440")
+        want = tk.StringVar()
+        entry = tk.Entry(win, textvariable=want, bg=CARD, fg=FG, insertbackground=FG, relief="flat", font=(FONT, 11),
+                         highlightthickness=1, highlightbackground=EDGE, highlightcolor=ACCENT)
+        entry.pack(fill="x", padx=16, pady=(16, 8), ipady=6, ipadx=6)
+        lb = tk.Listbox(win, bg=CARD, fg=FG, selectbackground=ACCENT, selectforeground="#ffffff", relief="flat",
+                        font=(FONT, 11), activestyle="none", highlightthickness=1, highlightbackground=EDGE)
+        lb.pack(fill="both", expand=True, padx=16)
+        info = tk.Label(win, text="", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
+        info.pack(fill="x", padx=16, pady=(6, 0))
+        shown = []
+
+        def fill(*_):
+            shown[:] = tv_apps.filter_apps(self.apps, want.get())
+            lb.delete(0, "end")
+            for a in shown:
+                lb.insert("end", ("★  " if a["id"] in self.pins else "     ") + a["name"])
+            if lb.size():
+                lb.selection_set(0)
+            info.config(text="" if self.apps else "Couldn't read the Roku's apps. Is it on and reachable?")
+
+        def picked():
+            sel = lb.curselection()
+            return shown[sel[0]] if sel else None
+
+        def open_it(_e=None):
+            a = picked()
+            if a:
+                self.launch(a["id"])
+                win.destroy()
+
+        def pin_it():
+            a, keep = picked(), lb.curselection()
+            if a:
+                self.toggle(a["id"])
+                fill()
+                if keep and keep[0] < lb.size():
+                    lb.selection_clear(0, "end")
+                    lb.selection_set(keep[0])
+
+        row = tk.Frame(win, bg=BG)
+        row.pack(pady=12)
+        RoundButton(row, "Open", open_it, width=140, height=38).pack(side="left", padx=6)
+        pin = RoundButton(row, "Pin / unpin", pin_it, width=140, height=38)
+        pin.style("Pin / unpin", "#26262b", "#34343a")
+        pin.pack(side="left", padx=6)
+        want.trace_add("write", fill)
+        lb.bind("<Double-Button-1>", open_it)
+        entry.bind("<Return>", open_it)
+        entry.bind("<Down>", lambda e: (lb.focus_set(), "break")[1])
+        win.bind("<Escape>", lambda e: win.destroy())
+        fill()
+        entry.focus_set()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1048,20 +1423,26 @@ class App(tk.Tk):
         self.host = tk.StringVar(value=cfg.get("host", DEFAULT_HOST))
         self.delay = tk.StringVar(value=str(cfg.get("delay", 500)))
         self.status = tk.StringVar(value="Not connected")
+        self.audio_device = cfg.get("audio_device", "")
         # worker threads read the Roku IP from here (Tk variables aren't thread-safe)
         self._host = self.host.get().strip() or DEFAULT_HOST
         self.host.trace_add("write", lambda *a: setattr(self, "_host", self.host.get().strip() or DEFAULT_HOST))
         try:
-            self._icon = tk.PhotoImage(file=asset("youtube.png"))
+            self._icon = tk.PhotoImage(file=asset("capocast.png"))
             self.iconphoto(True, self._icon)
         except Exception:
             pass
 
         self.autocast = cfg.get("autocast", True)
+        # one Discord status for both tabs, each with its own switch (both off until you turn them on)
+        self.discord = discord_presence.Status(cfg.get("discord_id", ""), log)
+        self.discord.enable("web", cfg.get("discord_on", False))
+        self.discord.enable("youtube", cfg.get("discord_youtube", False))
+        self._yt_since, self._yt_gone = 0.0, 0
         self.sync = None   # created once the bridge exists
         self.bridge = Bridge(log)
         self.bridge.settings["autocast"] = self.autocast
-        self.sync = CastSync(lambda: self._host, self.bridge)
+        self.sync = CastSync(lambda: self._host, self.bridge, self._yt_now)
         self.bridge.on_event = lambda ev: self.sync.push(ev) if self.autocast else None
         self.bridge_error = False
         try:
@@ -1080,7 +1461,7 @@ class App(tk.Tk):
         ui = SimpleNamespace(BG=BG, CARD=CARD, EDGE=EDGE, FG=FG, MUTED=MUTED, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
                              GREEN=GREEN, AMBER=AMBER, RED=RED, GREY=GREY, FONT=FONT, FONT_MED=FONT_MED,
                              RoundButton=RoundButton, NavButton=NavButton, Remote=Remote, log=log)
-        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"))
+        self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"), self.discord)
         self.page = None
         self._show("YouTube" if "--youtube" in sys.argv else "Web" if "--web" in sys.argv else "Listen")
 
@@ -1101,7 +1482,7 @@ class App(tk.Tk):
         cy = BAR_H // 2
 
         # brand: real YouTube icon + wordmark, sharing one centerline
-        self._logo = ImageTk.PhotoImage(Image.open(asset("youtube.png")).resize((30, 30), Image.LANCZOS))
+        self._logo = ImageTk.PhotoImage(Image.open(asset("capocast.png")).resize((30, 30), Image.LANCZOS))
         bar.create_image(22, cy, image=self._logo, anchor="w")
         brand = (FONT, 13, "bold")
         bar.create_text(60, text_y(brand, cy), text="CapoCast", anchor="w", fill=FG, font=brand)
@@ -1127,7 +1508,12 @@ class App(tk.Tk):
         status = (FONT, 9)
         self.r_status = bar.create_text(0, text_y(status, cy), text="", anchor="e", fill=MUTED, font=status)
         self.r_dot = bar.create_oval(0, 0, 0, 0, fill=GREY, outline="")
-        self.yt_items += [self.r_toggle, self.r_label, self.r_div, self.r_status, self.r_dot]
+        self.dc_toggle = Toggle(bar, self.discord.enabled.get("youtube", False), self._set_discord_youtube)
+        self.dc_win = bar.create_window(0, cy, window=self.dc_toggle, anchor="e")
+        self.dc_label = bar.create_text(0, text_y(label, cy), text="Discord", anchor="e", fill="#d4d4da", font=label)
+        self.dc_div = bar.create_line(0, cy - 11, 0, cy + 11, fill=EDGE)
+        self.yt_items += [self.r_toggle, self.r_label, self.r_div, self.dc_win, self.dc_label, self.dc_div,
+                          self.r_status, self.r_dot]
         self.hairline = bar.create_line(0, BAR_H - 1, 0, BAR_H - 1, fill=EDGE)
         bar.bind("<Configure>", lambda e: self._layout_bar(e.width))
 
@@ -1141,6 +1527,12 @@ class App(tk.Tk):
         bar.coords(self.r_label, x, bar.coords(self.r_label)[1])
         x -= tkfont.Font(font=bar.itemcget(self.r_label, "font")).measure("Auto-cast") + 16
         bar.coords(self.r_div, x, cy - 11, x, cy + 11)
+        x -= 16
+        bar.coords(self.dc_win, x, cy)
+        x -= int(self.dc_toggle["width"]) + 10
+        bar.coords(self.dc_label, x, bar.coords(self.dc_label)[1])
+        x -= tkfont.Font(font=bar.itemcget(self.dc_label, "font")).measure("Discord") + 16
+        bar.coords(self.dc_div, x, cy - 11, x, cy + 11)
         x -= 16
         bar.coords(self.r_status, x, bar.coords(self.r_status)[1])
         x -= tkfont.Font(font=bar.itemcget(self.r_status, "font")).measure(bar.itemcget(self.r_status, "text")) + 8
@@ -1229,6 +1621,10 @@ class App(tk.Tk):
         self.dpad.pack(anchor="w")
         tk.Label(side, text="Hold an arrow to repeat", bg=BG, fg=MUTED, font=(FONT, 9),
                  anchor="w").pack(fill="x", pady=(8, 0))   # same spacing as the "now playing" line opposite
+        tk.Label(side, text="Apps", bg=BG, fg=MUTED, font=(FONT, 10), anchor="w").pack(fill="x", pady=(14, 6))
+        self.apps_row = AppRow(side, tv_apps.clean_pins(self._load().get("quick_apps")), self._set_pins,
+                               lambda: self._host, log)
+        self.apps_row.pack(anchor="w")
         self.typebox = TypeBox(col, self.keys)
         self.typebox.pack(pady=(4, 16))
         # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
@@ -1258,6 +1654,14 @@ class App(tk.Tk):
         orow.pack(fill="x")
         self.host_entry = self._field(orow, "Roku IP", self.host, 15)
         self.delay_entry = self._field(orow, "Delay ms", self.delay, 6, pad=(14, 0))
+        obox = tk.Frame(orow, bg=BG)
+        obox.pack(side="left", padx=(14, 0), fill="x", expand=True)
+        tk.Label(obox, text="Output", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w")
+        self.out_lbl = tk.Label(obox, bg=CARD, fg=FG, font=(FONT, 10), anchor="w", cursor="hand2", padx=8,
+                                highlightthickness=1, highlightbackground=EDGE)
+        self.out_lbl.pack(fill="x", ipady=5, pady=(3, 0))
+        self.out_lbl.bind("<Button-1>", self._pick_output)
+        self._paint_output()
 
     def _build_youtube(self, page):
         self.yt_page = page
@@ -1330,7 +1734,57 @@ class App(tk.Tk):
     def _set_autocast(self, on):
         self.autocast = on
         self.bridge.settings["autocast"] = on
+        if not on:
+            self.discord.clear("youtube")     # the TV is no longer being driven from here
         self._save()
+
+    # ---- Discord status for YouTube videos ---------------------------------
+    def _set_discord_youtube(self, on):
+        if on and not self.discord.client_id:
+            found, problem = discord_presence.ask_application_id(self)
+            if not found:
+                self.dc_toggle.on = False
+                self.dc_toggle.draw()
+                if problem:
+                    messagebox.showinfo("Discord status", problem, parent=self)
+                return
+            self.discord.set_id(found)
+        self.discord.enable("youtube", on)
+        if on and self.sync.current:
+            self._yt_now(self.sync.title, self.sync.current)
+        self._save()
+
+    def _yt_now(self, title, video_id):
+        """A video started on the TV (or ended). Called from CastSync's thread; Status is safe to use from any thread."""
+        self._yt_want = video_id
+        if not video_id:
+            self.discord.clear("youtube")
+            return
+        if video_id != getattr(self, "_yt_id", None):
+            self._yt_id, self._yt_since = video_id, time.time()
+        if not self.discord.is_on("youtube"):
+            return
+        threading.Thread(target=self._yt_show, args=(title, video_id), daemon=True).start()
+
+    def _yt_show(self, title, video_id):
+        """Channel on the first line, the video's title under it. Both are looked up by video id, because the page
+        title the extension sends is still the previous video's when a new one starts."""
+        channel, name = discord_presence.youtube_info(video_id)
+        if self._yt_want != video_id:
+            return                        # the video changed (or ended) while this was being looked up
+        self.discord.show("youtube", channel or "YouTube", name or title or video_id, self._yt_since,
+                          f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg", image_text=name or title)
+
+    def on_tv_state(self, st):
+        """From the 1 s poll: if the TV has left Playlet, the YouTube status comes down."""
+        if self.discord.showing != "youtube" or st is None:
+            self._yt_gone = 0
+            return
+        gone = st["state"] == "none" or st.get("app") != "Playlet"
+        self._yt_gone = self._yt_gone + 1 if gone else 0
+        if self._yt_gone >= 2:
+            self._yt_gone = 0
+            self.discord.clear("youtube")
 
     def autocast_off(self):
         """A Web-tab cast owns the TV now; stop the YouTube tab's auto-cast from taking it back."""
@@ -1362,6 +1816,7 @@ class App(tk.Tk):
             self._polling = True
             host = self.host.get().strip() or DEFAULT_HOST
             threading.Thread(target=self._fetch, args=(host,), daemon=True).start()
+        self.apps_row.tick(self.host.get().strip() or DEFAULT_HOST)
         self.after(1000, self._poll)
 
     def _fetch(self, host):
@@ -1386,6 +1841,8 @@ class App(tk.Tk):
             time_txt = f"  ·  {fmt(st['pos'])} / {fmt(st['dur'])}" if st["dur"] else ""
             self.now.config(text=f"{st['app'] or 'Roku'}  ·  {label}{time_txt}")
         self.play_btn.set_kind("pause" if self.play_state == "play" else "play")
+        self.web.tv_state(st)
+        self.on_tv_state(st)
         self.typebox.render()   # picks up typing errors reported by the sender thread
 
     def _focused(self):
@@ -1482,10 +1939,40 @@ class App(tk.Tk):
         try:
             with open(CONFIG, "w", encoding="utf-8") as f:
                 json.dump({"host": self.host.get().strip(), "delay": self._delay(), "volume": self.pc_volume,
-                           "autocast": self.autocast, "web_home": getattr(getattr(self, "web", None), "home", None),
-                           "web_upscale": getattr(getattr(self, "web", None), "upscale", "off")}, f)
+                           "autocast": self.autocast, "audio_device": getattr(self, "audio_device", ""),
+                           "quick_apps": getattr(getattr(self, "apps_row", None), "pins", None),
+                           "web_home": getattr(getattr(self, "web", None), "home", None),
+                           "web_upscale": getattr(getattr(self, "web", None), "upscale", "off"),
+                           "discord_id": self.discord.client_id,
+                           "discord_on": self.discord.enabled.get("web", False),
+                           "discord_youtube": self.discord.enabled.get("youtube", False)}, f)
         except OSError:
             pass
+
+    def _set_pins(self, pins):
+        self._save()
+
+    def _paint_output(self):
+        name = self.audio_device or "System default"
+        self.out_lbl.config(text=name if len(name) <= 16 else name[:15] + "…")
+
+    def _pick_output(self, e=None):
+        """Menu of sound outputs. Takes effect at once while connected."""
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=FG, activebackground=ACCENT, activeforeground="#ffffff", bd=0)
+        for label, name in [("System default", "")] + [(n, n) for n in output_devices()]:
+            menu.add_command(label=("✓ " if name == self.audio_device else "   ") + label,
+                             command=lambda n=name: self._set_output(n))
+        try:
+            menu.tk_popup(self.out_lbl.winfo_rootx(), self.out_lbl.winfo_rooty() + self.out_lbl.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _set_output(self, name):
+        self.audio_device = name
+        self._paint_output()
+        if self.listener:
+            self.listener.device, self.listener.reopen = name, True
+        self._save()
 
     def _delay(self):
         try:
@@ -1558,6 +2045,7 @@ class App(tk.Tk):
     def connect(self):
         listener = Listener(self.host.get().strip() or DEFAULT_HOST, self._delay(), self.set_status)
         listener.volume = self.pc_volume / 100
+        listener.device = self.audio_device
         self.btn.style("Connecting…", ACCENT, ACCENT_HI, enabled=False)
         self.update_idletasks()
         try:
@@ -1593,6 +2081,7 @@ class App(tk.Tk):
         self.kb_watch.stop()
         self.chrome.release()
         self.web.close()
+        self.discord.stop()
         self.bridge.stop()
         if self.listener:
             self.listener.stop()

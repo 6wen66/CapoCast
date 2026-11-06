@@ -27,6 +27,7 @@ class WebSync:
     LEFT_PAGE = "You left the page, so the TV is no longer following it"
     FINISHED = "That one finished on the TV"
     TV_STOPPED = "The TV stopped playing this"
+    BROWSER_GONE = "The browser closed, so the TV is no longer following the page"
 
     def __init__(self, guard, tv, relay_add, log=lambda m: None, on_stop=lambda reason: None):
         self.guard, self.tv, self.relay_add, self.log, self.on_stop = guard, tv, relay_add, log, on_stop

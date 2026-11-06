@@ -21,6 +21,7 @@ import urllib.request
 
 from websockets.sync.client import connect
 
+from discord_presence import looks_like_logo
 from media_relay import replay_headers
 from stream_finder import SNIFF_MIMES, Candidate, classify, host_of, is_ad_url, site_of, sniff
 
@@ -50,7 +51,7 @@ PAGE_JS = r"""
       const h = Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
       out.push({src: v.currentSrc || v.src || '', dur: isFinite(v.duration) ? v.duration : 0,
                 playing: !v.paused && !v.ended && v.readyState > 2, area: Math.round(w * h), t: v.currentTime,
-                muted: v.muted});
+                muted: v.muted, poster: v.poster || ''});
     }
     const s = JSON.stringify(out.map(o => ({...o, t: 0})));
     // report changes at once, and re-send every ~2 s so the app can tell "still playing" from "gone"
@@ -292,6 +293,56 @@ class WebGuard:
                         return v["t"] + (now - e["at"] if v.get("playing") else 0.0)
         return None
 
+    IMAGE_JS = r"""(() => {
+      const abs = (u) => { try { return new URL(u, location.href).href; } catch (e) { return ''; } };
+      for (const sel of ['meta[property="og:image:secure_url"]', 'meta[property="og:image"]',
+                         'meta[name="twitter:image"]', 'meta[name="twitter:image:src"]']) {
+        const m = document.querySelector(sel);
+        if (m && m.content && m.content.trim()) return abs(m.content.trim());
+      }
+      return '';
+    })()"""
+
+    INFO_JS = r"""(() => {
+      const meta = (sel) => { const m = document.querySelector(sel); return (m && m.content || '').trim(); };
+      return JSON.stringify({url: location.href, title: document.title || '',
+                             og_title: meta('meta[property="og:title"]'), site: meta('meta[property="og:site_name"]')});
+    })()"""
+
+    def page_info(self, timeout=2.0):
+        """{'url', 'title', 'og_title', 'site'} of the page as it is right now (the live title, which a single-page site
+        updates as you change episode), or {} if the browser doesn't answer in time. Never raises."""
+        box, done = [], threading.Event()
+        self._cmds.put(("eval", (self.INFO_JS, lambda r: (box.append(r), done.set()))))
+        if done.wait(timeout) and box and isinstance(box[0], dict):
+            try:
+                info = json.loads((box[0].get("result") or {}).get("value") or "{}")
+            except (TypeError, ValueError):
+                return {}
+            return {k: str(v) for k, v in info.items()} if isinstance(info, dict) else {}
+        return {}
+
+    def page_image(self, timeout=2.0, dur=0):
+        """A picture for what's playing: the page's og:image / twitter:image, else the <video>'s poster. '' if the page
+        has neither (or only a picture that looks like the site's logo). Waits at most `timeout` seconds; never raises."""
+        box, done = [], threading.Event()
+        self._cmds.put(("eval", (self.IMAGE_JS, lambda r: (box.append(r), done.set()))))
+        found = ""
+        if done.wait(timeout) and box and isinstance(box[0], dict):
+            found = (box[0].get("result") or {}).get("value") or ""
+        if found.startswith("https://") and not looks_like_logo(found):
+            return found
+        now = time.time()
+        with self._lock:
+            for e in self._videos.values():
+                if now - e["at"] > 6:
+                    continue
+                for v in e["items"]:
+                    poster = v.get("poster") or ""
+                    if poster.startswith("https://") and (not dur or not v.get("dur") or abs(v["dur"] - dur) < 3):
+                        return poster
+        return ""
+
     def video_playing(self, dur=0):
         now = time.time()
         with self._lock:
@@ -443,6 +494,8 @@ class WebGuard:
                 self._send("Page.navigate", {"url": arg}, s)
             elif cmd == "reload":
                 self._send("Page.reload", {}, s)
+            elif cmd == "eval":
+                self._send("Runtime.evaluate", {"expression": arg[0], "returnByValue": True}, s, cb=arg[1])
             elif cmd == "history":
                 self._send("Page.getNavigationHistory", {}, s, cb=lambda r, d=arg: self._go(r, d))
             elif cmd == "post":

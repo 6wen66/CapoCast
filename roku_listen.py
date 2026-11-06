@@ -90,6 +90,8 @@ def rtp_loop(sock: socket.socket, host: str, delay_us: int, stop: threading.Even
             data, _ = sock.recvfrom(2048)
         except socket.timeout:
             continue
+        except ConnectionResetError:
+            continue                       # Windows reports an earlier send to a closed port here; not a failure
         except OSError:
             break
         if len(data) < 12 or data[0] >> 6 != 2:
