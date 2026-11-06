@@ -4,7 +4,7 @@
 
 # CapoCast
 
-**Your Roku's audio on your PC, a YouTube tab that plays everything you pick on your TV, and a Web tab that casts videos from any other site, with the pop-ups and fake buttons stripped out.**
+**Your Roku's audio on your PC, a YouTube tab that plays everything you pick on your TV, a Web tab that casts videos from any other site with the pop-ups and fake buttons stripped out, and a phone remote that puts it all in your pocket.**
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6)
@@ -20,6 +20,7 @@
 
 - **Private listening without your phone.** Roku's "private listening" normally streams TV audio to the Roku mobile app. CapoCast speaks the same protocol, so the sound plays straight from your PC: no phone, no Bluetooth relay, and much lower latency.
 - **YouTube on the TV, driven from your PC.** The YouTube tab is your real Chrome, with your login and all your extensions, embedded in the app. Pick a video and it plays on the TV. Pause, scrub, or switch videos, and the TV follows.
+- **Your phone as the remote, with no app to install.** Scan a code once and add CapoCast to your iPhone's home screen. It has the Roku remote, a full browser that sends videos to the TV, your bookmarks, and a card showing what's playing that you can scrub. No app store, Apple account or fee.
 - **Any other site on the TV, without the junk.** The Web tab is an ad-blocking browser (Brave) built into the app. Browse to anime, obscure streaming sites, anything, press play, then **Cast to TV**. Pop-ups, hijacking redirects and invisible click traps are stopped, and the app sends the real video to the TV, not the ad in front of it.
 
 > [!IMPORTANT]
@@ -69,6 +70,11 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | ✨ **4K upscaling for the TV** | Your PC sharpens Web tab casts to 4K as they play, with Anime4K for anime or FSRCNNX for live action, and the TV just plays the result (needs an NVIDIA GPU) |
 | 🚀 **Quick apps** | Tiles under the remote that open an app on the TV in one click. Playlet is there from the start; **All apps** lists everything on your Roku, and you can pin up to five |
 | 🔈 **Choose where the sound goes** | An **Output** menu on the Listen tab picks the PC's sound device, and it switches while connected. If the device disappears, CapoCast keeps trying for 30 s before giving up |
+| 📱 **Phone remote** | Control everything from your phone: an iPhone home-screen web app (free, no app store or signing) with the d-pad, playback, volume, typing on the TV, and the Roku's apps. Scan the QR code once; it works from then on |
+| 🧭 **Phone browser** | Browse the Web tab from your phone (tap, scroll, type, address bar) and press **Cast this page**. Bookmarks and history live on your PC, a "Watching" banner follows what the PC is casting, and play/pause and a scrub bar keep the page, the TV and Discord together |
+| 🔗 **Share-menu cast** | One-time iOS Shortcut so **Cast to TV** appears in the Share menu of Safari, YouTube and most apps. YouTube links go to Playlet, other sites cast through the Web tab |
+| 💬 **Subtitles on the TV** | Pick a subtitle language in the Web tab and the PC burns it into the upscaled cast (needs an NVIDIA GPU) |
+| 🎮 **Discord status** | Optional: shows what you're watching as your Discord status, with a thumbnail and a clock that follows the TV's real position |
 | 🎭 **Decoy filter** | Ignores ad clips, previews, thumbnails and loose segments, and picks the long video from the frame that's actually playing. If two streams look alike, it asks you |
 
 <img src="docs/screenshots/listen-tab.png" width="640" alt="CapoCast Listen tab">
