@@ -52,7 +52,7 @@ def main():
     app = smoke.FakeApp(root)
     ui = SimpleNamespace(BG=g.BG, CARD=g.CARD, EDGE=g.EDGE, FG=g.FG, MUTED=g.MUTED, ACCENT=g.ACCENT, ACCENT_HI=g.ACCENT_HI,
                          GREEN=g.GREEN, AMBER=g.AMBER, RED=g.RED, GREY=g.GREY, FONT=g.FONT, FONT_MED=g.FONT_MED,
-                         RoundButton=g.RoundButton, NavButton=g.NavButton, Remote=g.Remote,
+                         RoundButton=g.RoundButton, NavButton=g.NavButton, Chip=g.Chip, Tooltip=g.Tooltip, Remote=g.Remote,
                          log=lambda m: print("   log:", m) if any(k in m for k in ("subtitles", "cast", "upscale", "failed")) else None)
     page = tk.Frame(root)
     tab = web_tab.WebTab(app, page, ui, home=url, subs="english")

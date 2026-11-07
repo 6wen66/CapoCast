@@ -65,12 +65,12 @@
     const v = e.target;
     if (!active(v)) return;
     if (currentId() !== castId) castNow(v);          // a new video started here: put it on the TV
-    else { mute(v); send({ kind: "play", id: castId, t: Math.floor(v.currentTime) }); }
+    else { mute(v); if (Date.now() >= ignoreSeeksUntil) send({ kind: "play", id: castId, t: Math.floor(v.currentTime) }); }
   }, true);
 
   document.addEventListener("pause", (e) => {
     const v = e.target, id = currentId();
-    if (!active(v) || id !== castId || v.ended) return;
+    if (!active(v) || id !== castId || v.ended || Date.now() < ignoreSeeksUntil) return;   // not our own pause from a resync
     // Leaving the watch page also pauses the player; only mirror a pause if we're still on the same video.
     setTimeout(() => { if (currentId() === id && v.paused && !v.seeking) send({ kind: "pause", id }); }, 300);
   }, true);
@@ -133,7 +133,7 @@
     // Each poll carries where this player is, so the app can line it up with the TV.
     const v = mainVideo();
     if (autocast && castId && v && !v.muted) mute(v);   // the sound is on the TV; keep this copy silent
-    const state = castId && v ? { id: castId, t: v.currentTime.toFixed(2), paused: v.paused ? 1 : 0 } : {};
+    const state = castId && v ? { id: castId, t: v.currentTime.toFixed(2), paused: v.paused ? 1 : 0, ad: isAd() ? 1 : 0 } : {};
     state.gap = (worstGap / 1000).toFixed(2);           // the page's slowest timer gap and last round trip since the last poll
     state.rtt = (lastRtt / 1000).toFixed(2);
     worstGap = 0;
@@ -151,9 +151,12 @@
           if (cmd.history) history.go(cmd.history);
           if (cmd.reload) location.reload();
           // The TV is the real screen: snap this (muted) player to its timeline without echoing a seek back.
-          if (cmd.sync != null && cmd.syncId === castId && v) {
-            ignoreSeeksUntil = Date.now() + 1500;
+          // Not during an ad: the ad's clock is not the video's. The app can also match play / pause on a resync.
+          if (cmd.sync != null && cmd.syncId === castId && v && !isAd()) {
+            ignoreSeeksUntil = Date.now() + 3000;   // YouTube reports a seek late; 1.5 s let some echoes through
             v.currentTime = cmd.sync;
+            if (cmd.syncPaused === true && !v.paused) v.pause();
+            if (cmd.syncPaused === false && v.paused) v.play().catch(() => {});
           }
         });
       } catch { /* extension reloaded */ }

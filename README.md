@@ -60,10 +60,11 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | 🎧 **TV audio on your PC** | Roku private listening over Wi-Fi, with a live volume slider (0–200 %) and adjustable buffer delay |
 | 🛡️ **Smooth audio over flaky Wi-Fi** | A small sound buffer and gap concealment cover the TV's Wi-Fi pauses, which are about a quarter of a second every few seconds on some TVs. The **Sound delay** slider on the Listen tab sets that buffer (300 ms by default) and moves the sound later or earlier live, so you can drag it until the lips match |
 | ⏯️ **Remote control** | Roku-style arrows and OK (hold to repeat), Back, play/pause, rewind, fast-forward, and exact ±10 s seeks, with live "now playing" status |
-| ⌨️ **Type on TV** | Type into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus. Like the phone app, it pops up by itself when a keyboard opens on the TV |
+| ⌨️ **Type on TV** | The keyboard icon at the top right shows a box for typing into the TV's search and sign-in boxes from your PC keyboard (Ctrl+V pastes); arrows, Enter and Esc work the menus. Like the phone app, it pops up by itself when a keyboard opens on the TV |
 | ▶️ **Embedded YouTube** | Your own Chrome profile (login, extensions, dark mode) inside the app window |
 | 📺 **Auto-cast sync** | Play, pause, scrub, autoplay-next and Shorts mirror to the TV; going back to Home sends Playlet back to its home screen |
 | 🎯 **Latency compensation** | Learns how long Playlet takes to rebuffer and aims seeks ahead, then keeps the PC player locked to the TV's timeline |
+| 🔁 **Resync** | One button (top bar of the YouTube tab, and on the phone) that lines the video on your PC up with the one on the TV again, whichever way they drifted: position, play / pause, and a TV that moved on or lost the video |
 | 🧩 **Playlet Cast extension** | One-click "cast this tab" from normal Chrome too (Alt+Shift+C, or right-click a link → *Cast link to Playlet*) |
 | 🔊 **Volume that follows the sound** | One slider that controls the PC volume (0–200 %) while audio is routed to this PC, and the TV's own volume otherwise, switching by itself and following the TV if you use its remote |
 | 🌐 **Web tab** | Browse any site in a private, windowless Brave (the app draws the page itself), then cast the video on the page to the TV (HLS, DASH and MP4). Pause, play and scrubbing on the page follow on the TV |
@@ -76,7 +77,7 @@ CapoCast plays everything through **Playlet**, a free and open-source YouTube cl
 | 🔗 **Share-menu cast** | One-time iOS Shortcut so **Cast to TV** appears in the Share menu of Safari, YouTube and most apps. YouTube links go to Playlet, other sites cast through the Web tab |
 | 💬 **Subtitles on the TV** | Pick a subtitle language in the Web tab and the PC burns it into the upscaled cast (needs an NVIDIA GPU) |
 | ⏭️ **Continue Watching** | The Web tab remembers where the TV stopped in each show. A **Continue** menu on the PC and a **Continue** page in the phone's Pages sheet resume it, play the next episode, or start over |
-| 🩺 **Connection health** | A panel (Listen tab) showing whether the TV answers, Playlet reloads, TV buffering, and, for every stall, whether this app, the browser or the link froze. **Copy report** puts it on the clipboard |
+| 🩺 **Connection health** | A panel (the pulse icon at the top right) showing whether the TV answers, Playlet reloads, TV buffering, and, for every stall, whether this app, the browser or the link froze. **Copy report** puts it on the clipboard |
 | 🎮 **Discord status** | Optional: shows what you're watching as your Discord status, with a thumbnail and a clock that follows the TV's real position |
 | 🎭 **Decoy filter** | Ignores ad clips, previews, thumbnails and loose segments, and picks the long video from the frame that's actually playing. If two streams look alike, it asks you |
 
@@ -123,11 +124,11 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 
 1. Enter your Roku's IP (it's saved for next time) and click **Connect**. The TV's speakers mute and the audio plays on your PC.
 2. **Volume** follows wherever the sound is going, and switches by itself. While you're connected (the sound plays on this PC) it's the PC volume, **0–200 %**, where everything above 100 % is a boost. While you're not connected (the sound plays on the TV) it's the **TV's own volume**, 0–100. Dragging it steps the TV up or down, it follows the TV live if you use the physical remote, and a **Mute** switch appears. The Roku can't be asked for its volume, so it shows **—** until the TV first reports one, which happens on your first change.
-3. **Sound delay** (the slider under Volume) moves the sound later or earlier, live: drag it while you watch until the lips match. It's also the cushion that covers the TV's Wi-Fi pauses, so very low values can skip. **Delay ms** sets the Roku-side buffer on top of that (changes when you reconnect). Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles. **Output** picks which sound device plays the TV's audio and applies at once while connected; "System default" follows Windows. If the sound stops arriving, the status changes to **No audio from the Roku** and goes back when it returns.
+3. **Sound delay** (the slider under Volume) moves the sound later or earlier, live: drag it while you watch until the lips match. It's also the cushion that covers the TV's Wi-Fi pauses, so very low values can skip. **Roku buffer** (in ms) sets the Roku-side buffer on top of that (changes when you reconnect). Lower it (about 200) for tighter lip-sync, or raise it if you hear crackles. **Output** picks which sound device plays the TV's audio and applies at once while connected; "System default" follows Windows. **Find**, beside the Roku IP, looks for Rokus on your network so you don't have to type the address. If the sound stops arriving, the status changes to **No audio from the Roku** and goes back when it returns.
 4. **Apps** (under the remote) are one-click tiles that open an app on the TV. Playlet is there to start with. **All apps** lists everything on your Roku, where you can open an app or pin up to five to the tiles; right-click a tile to unpin it.
-5. The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button. The **Remote** column beside them has the remote's arrows and **OK** as square buttons. Holding an arrow repeats it.
-6. **Type on TV:** click the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys.
-7. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, selects the Type box (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the app goes back to the tab you were on. You can also start typing anywhere on the Listen tab without clicking the box first.
+5. The thin bar under the "now playing" line shows how far into the video the TV is; click it to jump there (YouTube in Playlet). The transport buttons control whatever is playing on the Roku. The first one is the remote's **Back** button. The **Remote** column beside them has the remote's arrows and **OK** as square buttons. Holding an arrow repeats it.
+6. **Type on TV:** click the keyboard icon at the top right (next to the pulse icon) to show the box, then type. Letters go into whatever search or sign-in box is open on the TV, and **Ctrl+V** pastes, which is handy for long passwords. While the box is selected, the arrow keys move around the TV's menus, **Enter** is OK, **Esc** is Back and **Backspace** deletes. Click anywhere else in the app to stop sending keys, or click the icon again to hide the box.
+7. **Keyboard pop-up:** when a search or sign-in keyboard opens on the TV, the app switches to the Listen tab, shows the Type box if it was hidden, selects it (outlined in green) and comes to the front. If another app such as a game is in the foreground, Windows flashes the taskbar button instead. The box shows the TV's own text, with passwords as dots. When the TV's keyboard closes, the box hides again (if it opened by itself) and the app goes back to the tab you were on. While the box is showing you can start typing anywhere on the Listen tab without clicking it first.
 
 ### YouTube tab
 
@@ -142,7 +143,9 @@ Then load the `extension/` folder in Chrome as in steps 3–4 above. To build yo
 | Scrub the timeline | Seeks, aimed ahead to cover Playlet's rebuffer |
 | Go back to Home, search or a channel | Closes the player and returns to Playlet's home screen |
 
-The status next to the switch shows the link state: **Ready**, **On TV · \<title\>**, **Connecting…**, or a hint if something's wrong. Turning Auto-cast off unmutes the PC and leaves the TV alone.
+The status in the top bar shows the link state: **Ready**, **On TV · \<title\>**, **Connecting…**, or a hint if something's wrong. Turning Auto-cast off unmutes the PC and leaves the TV alone.
+
+**Resync.** If the video on the PC and the one on the TV drift apart (a stall, a Wi-Fi pause, something paused from the remote), click **Resync** in the top bar. The TV is the reference: the PC player is moved onto its position, measured again and corrected until they agree, and its play / pause is matched. If the TV moved on to another video (autoplay, or someone used the remote) the PC opens that one; if the TV lost the video, the PC's video is sent to it again. During an ad on the PC it asks you to wait. The result appears in the status for a few seconds. The same button is on the phone's now-playing card. It needs Auto-cast on, and the extension reloaded after this update (version 1.2.3) to also match play / pause and to skip ads.
 
 ### Web tab
 
@@ -249,7 +252,7 @@ The text is sent only to the Discord app on your PC, over its local connection. 
 
 ### Phone remote
 
-Control the TV from an iPhone (or any phone) on the same Wi-Fi, with no app store, no Apple account and no signing. On the Listen tab click **Phone remote**, turn it on, scan the code with the phone's camera, open the link in Safari, then **Share > Add to Home Screen**. It then opens full screen like an app.
+Control the TV from an iPhone (or any phone) on the same Wi-Fi, with no app store, no Apple account and no signing. Click the phone icon at the top right, turn it on, scan the code with the phone's camera, open the link in Safari, then **Share > Add to Home Screen**. It then opens full screen like an app.
 
 - **Remote:** d-pad (hold to repeat), play/pause, skip 10 s, back, home, volume and mute, and a box for typing on the TV.
 - **Browse:** the Web tab's browser, on your phone. It shows the PC's page live (the same ad blocking and pop-up protection) and you tap, drag to scroll, type, and use the address bar, back and forward like any phone browser. **Cast this page** sends whatever you're looking at to the TV, with the same video finding as the PC's Cast button. Its play/pause and 10-second buttons control the page's video, so the TV, the page and Discord stay together. The picture is the PC browser's, so it is a little soft on a high-resolution screen.
@@ -296,7 +299,9 @@ python roku_listen.py --host 192.168.1.50 --delay-ms 300
 
 ```
 roku-listen/
-├── roku_listen_gui.py     # desktop app: UI, audio, remote control, auto-cast sync
+├── roku_listen_gui.py     # desktop app: window, audio, remote control, auto-cast sync (and Resync)
+├── ui_kit.py              # the look: colours, font, anti-aliased buttons, sliders, switches, chips, tooltips
+├── roku_find.py           # finds Rokus on the network (SSDP) for the Find button
 ├── roku_listen.py         # protocol helpers + command-line client
 ├── yt_embed.py            # launches and embeds Chrome in the YouTube tab
 ├── yt_bridge.py           # local bridge between the app and the extension
@@ -335,7 +340,7 @@ roku-listen/
 | **Can't reach Playlet on the Roku** | Open Playlet on the TV and check the Roku IP. |
 | Remote buttons or **Type on TV** do nothing | On the Roku: *Settings → System → Advanced system settings → Control by mobile apps → Network access → Default/Permissive*. |
 | Connected but no sound | Allow CapoCast through Windows Firewall on private networks, and check that FFmpeg is on your `PATH`. |
-| Crackling audio | Raise **Delay ms** (try 500–700). |
+| Crackling audio | Raise **Roku buffer** (try 500–700). |
 | Status says **No audio from the Roku** | The TV stopped sending sound (it may be off, or on an input that has none). It recovers by itself when sound returns. Once a minute the log has an `rtp:` line counting packets that never arrived. |
 | Status says **Audio device lost, reconnecting…** | The sound device went away (unplugged, or a driver reset). CapoCast retries for 30 s; pick another device in **Output** if it doesn't come back. |
 | The Apps tiles show names, not pictures | The Roku wasn't reachable yet. They fill in by themselves and retry every 30 s. |
