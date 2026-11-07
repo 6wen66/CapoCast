@@ -127,6 +127,24 @@ PAGE_JS = r"""
     document.addEventListener('DOMContentLoaded', paint);
   }
 
+  // ---- is a text field focused? (the phone pops its typing bar up when one is) ----
+  if (window === top) {
+    const editable = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.isContentEditable) return true;
+      if (el.tagName === 'TEXTAREA') return !el.readOnly && !el.disabled;
+      if (el.tagName !== 'INPUT' || el.readOnly || el.disabled) return false;
+      return /^(|text|search|url|email|password|tel|number)$/i.test(el.getAttribute('type') || '');
+    };
+    let was = '';
+    const report = () => {
+      const now = editable(document.activeElement) ? '1' : '0';
+      if (now !== was) { was = now; call('rlEdit', now); }
+    };
+    addEventListener('focusin', () => setTimeout(report, 0), true);
+    addEventListener('focusout', () => setTimeout(report, 0), true);
+  }
+
   // ---- mirroring: while a Web cast plays on the TV, this page's video is a muted remote control for it ----
   let mirror = false, ignoreUntil = 0;
   const muted = new WeakSet();
@@ -254,6 +272,7 @@ class WebGuard:
         self._last_gesture = 0.0
         self.on_youtube = None           # called with the address of a YouTube video tapped in the phone's YouTube tab
         self._yt_dark = False            # YouTube's theme cookie has been set in this browser
+        self._editing = False            # a text field has focus on the page
         self._allowed = {}               # site -> expiry time ("Allow once")
         # shared with the UI (guarded by _lock)
         self.page_events = queue.Queue(maxsize=300)   # play / pause / seeked / ended from the page's videos
@@ -297,7 +316,7 @@ class WebGuard:
             return {"running": self.running, "error": self.error, "url": self._url, "title": self._title,
                     "stats": dict(self.stats), "streams": sum(1 for c in self._cands.values()),
                     "last_block": dict(self.last_block) if self.last_block else None,
-                    "unsupported": self._unsupported}
+                    "unsupported": self._unsupported, "editing": self._editing}
 
     def candidates(self):
         now = time.time()
@@ -447,6 +466,28 @@ class WebGuard:
                 return {}
             return {k: str(v) for k, v in info.items()} if isinstance(info, dict) else {}
         return {}
+
+    LINKS_JS = r"""(() => {
+      const out = [];
+      for (const a of document.querySelectorAll('a[href]')) {
+        const h = a.href;
+        if (/^https?:/.test(h) && /\d/.test(h) && out.length < 400 && !out.includes(h)) out.push(h);
+      }
+      return JSON.stringify(out);
+    })()"""
+
+    def page_links(self, timeout=2.0):
+        """The addresses of the page's links that contain a number (episode lists, 'next' buttons), or [] if there are
+        none or the browser doesn't answer in time. Never raises."""
+        box, done = [], threading.Event()
+        self._cmds.put(("eval", (self.LINKS_JS, lambda r: (box.append(r), done.set()))))
+        if done.wait(timeout) and box and isinstance(box[0], dict):
+            try:
+                links = json.loads((box[0].get("result") or {}).get("value") or "[]")
+            except (TypeError, ValueError):
+                return []
+            return [str(x) for x in links if isinstance(x, str)] if isinstance(links, list) else []
+        return []
 
     def page_images(self, timeout=2.0, dur=0):
         """Every picture the page offers for what's playing, best guess first: its preview tags (og:image, twitter:image,
@@ -695,7 +736,7 @@ class WebGuard:
         send("Page.enable")
         send("Network.enable")
         send("Runtime.enable")
-        for name in ("rlGesture", "rlVideo", "rlBlocked", "rlEvent", "rlYoutube"):
+        for name in ("rlGesture", "rlVideo", "rlBlocked", "rlEvent", "rlYoutube", "rlEdit"):
             send("Runtime.addBinding", {"name": name})
         send("Page.addScriptToEvaluateOnNewDocument", {"source": PAGE_JS, "runImmediately": True})
         if not waiting:          # already-loaded page; a frame still frozen at start picks the script up on load
@@ -770,6 +811,7 @@ class WebGuard:
                 self._unsupported = ""
                 self.stats = {"popups": 0, "redirects": 0, "overlays": 0, "ads": 0}
                 self.last_block = None
+                self._editing = False        # a new page starts with nothing focused
             self._url = frame["url"]
 
     def _on_Page_navigatedWithinDocument(self, p, session):
@@ -828,6 +870,10 @@ class WebGuard:
             self._last_gesture = time.time()
         elif name == "rlBlocked":
             self._blocked("overlays", "click-trap", "")
+        elif name == "rlEdit":
+            if session == self._main:
+                with self._lock:
+                    self._editing = str(p.get("payload", "")) == "1"
         elif name == "rlYoutube":
             url = str(p.get("payload", ""))[:2000]
             if url.startswith("https://") and self.on_youtube:

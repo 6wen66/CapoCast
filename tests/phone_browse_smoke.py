@@ -139,6 +139,7 @@ def main():
         tab.guard, tab.home, tab.launched_at, tab.busy, tab.link, tab.sync = guard, url, time.time(), False, None, None
         tab.note, tab.note_until = ("", None), 0.0
         tab.ui = SimpleNamespace(GREEN="g", log=lambda m: None)
+        tab.app = SimpleNamespace()
         tab.alive = lambda: True
         tab._post = lambda fn: fn()
 
@@ -180,6 +181,12 @@ def main():
               str(eval_js("document.getElementById('i').value")))
         call("/api/web/input", {"type": "key", "name": "Backspace"})
         check("backspace deletes a character", wait_for(lambda: eval_js("document.getElementById('i').value") == "hello phon"))
+        call("/api/web/input", {"type": "edit", "back": 3, "text": "ne"})
+        check("live typing: delete 3, type 'ne'", wait_for(lambda: eval_js("document.getElementById('i').value") == "hello pne"),
+              str(eval_js("document.getElementById('i').value")))
+        check("info says a text field has focus (the phone's typing bar opens)", wait_for(
+            lambda: json.loads(call("/api/web/info")[2]).get("editing")))
+        eval_js("document.getElementById('i').value='hello phon'")
 
         # 3. scroll
         call("/api/web/input", {"type": "scroll", "x": 100, "y": 300, "dx": 0, "dy": 250})

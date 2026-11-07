@@ -101,6 +101,19 @@ class Routes(unittest.TestCase):
         self.assertEqual(self.web.log, [("tap", 100.5, 200.0), ("scroll", 50.0, 60.0, 0.0, 33.0), ("text", "hello"),
                                         ("key", "Enter")])
 
+    def test_live_typing_deletes_then_types_in_one_request(self):
+        self.call("/api/web/input", {"type": "edit", "back": 2, "text": "ab"})
+        self.call("/api/web/input", {"type": "edit", "back": 0, "text": "c"})
+        self.call("/api/web/input", {"type": "edit", "back": 1, "text": ""})
+        self.assertEqual(self.web.log, [("key", "Backspace"), ("key", "Backspace"), ("text", "ab"), ("text", "c"),
+                                        ("key", "Backspace")])
+
+    def test_empty_or_silly_edits_are_refused(self):
+        for body in ({"type": "edit", "back": 0, "text": ""}, {"type": "edit", "back": -1, "text": "a"},
+                     {"type": "edit", "back": 9999, "text": "a"}, {"type": "edit", "back": "x", "text": "a"}):
+            self.assertEqual(self.call("/api/web/input", body)[0], 400, body)
+        self.assertEqual(self.web.log, [])
+
     def test_bad_input_is_refused(self):
         for body in ({"type": "tap", "x": "a", "y": 1}, {"type": "tap", "x": 99999, "y": 1}, {"type": "key", "name": "F12"},
                      {"type": "text", "text": ""}, {"type": "scroll", "x": 1, "y": 1, "dx": 0, "dy": 10 ** 6},

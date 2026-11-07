@@ -319,6 +319,16 @@ class PhoneRemote:
                 if not text:
                     raise ValueError("nothing to type")
                 b.web_text(text)
+            elif kind == "edit":
+                # live typing: delete `back` characters, then type `text`, in one round trip
+                back = int(_coord(body, "back", 500))
+                text = str(body.get("text", ""))[:500]
+                if back < 0 or not (back or text):
+                    raise ValueError("nothing to type")
+                for _ in range(back):
+                    b.web_key("Backspace")
+                if text:
+                    b.web_text(text)
             elif kind == "key":
                 key = str(body.get("name", ""))
                 if key not in WEB_KEYS:
@@ -347,6 +357,11 @@ class PhoneRemote:
             b.web_transport(action, value)
         elif name == "cast":
             return 200, {"message": b.web_cast()}, js
+        elif name == "continue":
+            action = str(body.get("action", ""))
+            if action not in ("resume", "start", "next", "remove", "clear"):
+                raise ValueError("unknown action")
+            return 200, {"message": b.web_continue(action, str(body.get("url", ""))[:2000])}, js
         elif name == "youtube":
             go = str(body.get("go") or "")[:300]
             b.web_youtube(bool(body.get("on")), go)
@@ -520,8 +535,9 @@ body.browsing header{display:none}
   font-size:14px;line-height:1.5;pointer-events:none}
 #bstat{position:absolute;left:8px;right:8px;top:8px;padding:6px 10px;border-radius:10px;background:rgba(15,15,18,.82);font-size:12px;
   color:var(--green);pointer-events:none;display:none}
-#kb{position:absolute;left:0;right:0;bottom:0;display:none;gap:6px;padding:8px;background:rgba(15,15,18,.95);border-top:1px solid var(--edge)}
+#kb{position:absolute;left:0;right:0;top:0;z-index:5;display:none;gap:6px;padding:8px;background:rgba(15,15,18,.96);border-bottom:1px solid var(--edge)}
 #kb.on{display:flex}
+body.kbon #bstat{top:64px}
 #kb input{min-height:44px;padding:8px 12px;font-size:16px;flex:1;min-width:0;width:auto}
 #kb button{flex:0 0 auto;min-width:48px;min-height:44px;padding:0 10px;font-size:14px}
 #watch{display:none;align-items:center;gap:8px;margin:10px 0 0;padding:8px 10px;border:1px solid var(--edge);border-radius:12px;background:var(--card);font-size:13px}
@@ -551,6 +567,12 @@ body.browsing header{display:none}
 .pg .l span{display:block;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pg button{flex:0 0 40px;min-height:40px;font-size:16px;color:var(--muted);background:none;border:0}
 .empty{color:var(--muted);text-align:center;padding:30px 10px;font-size:14px}
+.pg.cw{flex-wrap:wrap;padding:8px 0}
+.pg.cw .l{flex:1 0 100%;padding:2px 4px}
+.pg.cw .acts{display:flex;gap:8px;flex:1 0 100%;padding:0 4px}
+.pg.cw .acts button{flex:1;min-height:38px;font-size:14px;color:var(--fg);background:var(--card);border:1px solid var(--edge);border-radius:10px}
+.pg.cw .acts button.go{background:var(--accent);border-color:var(--accent);font-weight:600}
+.pg.cw .acts button.x{flex:0 0 44px;color:var(--muted)}
 #bact #kbd,#bact #star,#bact #pages{flex:0 0 52px;font-size:19px}
 #bact{display:flex;gap:8px;padding:8px}
 #ytlabel,#plbtn{display:none}
@@ -606,8 +628,8 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
     <span id="ytlabel">YouTube</span><button id="plbtn" aria-label="Playlet settings">⚙</button>
   </div>
   <div id="view"><img id="shot" alt="" draggable="false"><div id="vmsg">Opening the browser on your PC…</div><div id="bstat"></div>
-    <div id="kb"><input id="kbtext" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Type into the page">
-      <button id="kbsend" class="go">Send</button><button id="kbenter">⏎</button><button id="kbdel">⌫</button></div></div>
+    <div id="kb"><input id="kbtext" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Type here — it goes to the page as you type">
+      <button id="kbdel" aria-label="Delete">⌫</button><button id="kbenter" class="go" aria-label="Enter">⏎</button><button id="kbclose" aria-label="Hide keyboard">✕</button></div></div>
   <div id="btrans"><button data-skip="-10">⟲ 10s</button><button id="bpp">⏯</button><button data-skip="10">10s ⟳</button></div>
   <div id="bact"><button id="kbd" aria-label="Keyboard">⌨</button><button id="star" aria-label="Bookmark this page">☆</button><button id="pages" aria-label="Bookmarks and history">☰</button><button id="bcast" class="go">Cast this page</button></div>
 </section>
@@ -632,7 +654,7 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
   <div class="apps" id="apps"></div>
 </section>
 </div>
-<div id="sheet"><div class="sh"><div class="shh"><button data-pg="bookmarks" class="on">Bookmarks</button><button data-pg="history">History</button><button id="shclose" aria-label="Close">✕</button></div>
+<div id="sheet"><div class="sh"><div class="shh"><button data-pg="continue">Continue</button><button data-pg="bookmarks" class="on">Bookmarks</button><button data-pg="history">History</button><button id="shclose" aria-label="Close">✕</button></div>
   <div id="shlist"></div><button class="small" id="shclear" style="display:none;margin-top:8px;flex:0 0 auto">Clear history</button></div></div>
 <nav id="nav"><button data-tab="remote" class="on"><b>◉</b>Remote</button><button data-tab="browse"><b>◍</b>Browse</button><button data-tab="yt"><b>▶</b>YouTube</button><button data-tab="cast"><b>⇪</b>Cast</button><button data-tab="apps"><b>▦</b>Apps</button></nav>
 <script>
@@ -749,6 +771,7 @@ function showTab(tab){
   document.body.classList.toggle("browsing",sec==="browse"||sec==="playlet");
   document.body.classList.toggle("ytmode",yt&&!ytSub);
   if(tab==="apps") loadApps();
+  if(sec!=="browse") kbShow(false);
   browse(sec==="browse");
   ytSession(yt&&!ytSub);
   plShow(yt&&ytSub);
@@ -848,6 +871,7 @@ async function infoLoop(id){
       st.style.color=i.note&&!i.note.ok?"var(--amber)":"var(--green)";
       $("#bcast").textContent=i.busy?"Cancel":i.following?"Recast this page":"Cast this page";
       if(bookmarked!==!!i.bookmarked){ bookmarked=!!i.bookmarked; paintStar(); }
+      kbFollow(!!i.editing);
     }catch(e){}
     await sleep(1000);
   }
@@ -864,15 +888,33 @@ let bookmarked=false;
 $("#star").onclick=async()=>{ const d=await act("/api/web/bookmark",{action:"toggle"}); if(d){ bookmarked=d.bookmarked; paintStar(); note(bookmarked?"Bookmarked":"Bookmark removed",true); } };
 function paintStar(){ $("#star").textContent=bookmarked?"★":"☆"; $("#star").style.color=bookmarked?"var(--amber)":""; }
 let sheetPage="bookmarks", pagesData=null;
-async function openSheet(){ $("#sheet").classList.add("on"); pagesData=await act("/api/web/pages"); renderSheet(); }
+async function openSheet(){ $("#sheet").classList.add("on"); pagesData=await act("/api/web/pages"); if(pagesData&&pagesData.continue&&pagesData.continue.length) sheetPage="continue"; renderSheet(); }
+function clock(s){ s=Math.max(0,Math.floor(s)); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return (h?h+":"+String(m).padStart(2,"0"):m)+":"+String(x).padStart(2,"0"); }
+async function cwAct(action,url){ const d=await act("/api/web/continue",{action,url}); if(d&&d.message) note(d.message,true); if(action==="remove"||action==="clear"){ pagesData=await act("/api/web/pages"); renderSheet(); } else closeSheet(); }
+function renderContinue(list,rows){
+  rows.forEach(r=>{
+    const row=document.createElement("div"); row.className="pg cw";
+    const done=r.finished, left=Math.max(0,r.dur-r.pos);
+    row.innerHTML='<div class="l"><b></b><span></span></div><div class="acts"></div>';
+    row.querySelector("b").textContent=r.title||host(r.url);
+    row.querySelector("span").textContent=(done?"Finished":clock(left)+" left")+" · "+(r.site||host(r.url));
+    const acts=row.querySelector(".acts");
+    const add=(label,cls,fn)=>{ const b=document.createElement("button"); b.textContent=label; if(cls) b.className=cls; b.onclick=fn; acts.appendChild(b); };
+    if(done){ add("Play next","go",()=>cwAct("next",r.url)); add("Watch again","",()=>cwAct("start",r.url)); }
+    else { add("Resume "+clock(r.pos),"go",()=>cwAct("resume",r.url)); add("Start over","",()=>cwAct("start",r.url)); }
+    add("✕","x",()=>cwAct("remove",r.url));
+    list.appendChild(row);
+  });
+}
 function closeSheet(){ $("#sheet").classList.remove("on"); }
 function host(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return u; } }
 function renderSheet(){
   $$("#sheet [data-pg]").forEach(b=>b.classList.toggle("on",b.dataset.pg===sheetPage));
   $("#shclear").style.display=sheetPage==="history"&&pagesData&&pagesData.history.length?"block":"none";
   const list=$("#shlist"); list.innerHTML="";
-  const rows=pagesData?pagesData[sheetPage]:[];
-  if(!rows.length){ list.innerHTML='<div class="empty">'+(sheetPage==="bookmarks"?"No bookmarks yet. Tap ☆ on a page to save it.":"Nothing here yet.")+'</div>'; return; }
+  const rows=pagesData?(pagesData[sheetPage]||[]):[];
+  if(!rows.length){ list.innerHTML='<div class="empty">'+(sheetPage==="bookmarks"?"No bookmarks yet. Tap ☆ on a page to save it.":sheetPage==="continue"?"Nothing to continue yet. Shows you cast from the Browse tab appear here, where you stopped.":"Nothing here yet.")+'</div>'; return; }
+  if(sheetPage==="continue") return renderContinue(list,rows);
   rows.forEach(r=>{
     const row=document.createElement("div"); row.className="pg";
     row.innerHTML='<div class="l"><b></b><span></span></div>'+(sheetPage==="bookmarks"?'<button aria-label="Remove">✕</button>':'');
@@ -889,15 +931,45 @@ $$("#sheet [data-pg]").forEach(b=>b.onclick=()=>{ sheetPage=b.dataset.pg; render
 $("#shclear").onclick=async()=>{ await act("/api/web/bookmark",{action:"clear_history"}); pagesData=await act("/api/web/pages"); renderSheet(); };
 $("#setuplink").onclick=e=>{ e.preventDefault(); location.href="/setup?k="+encodeURIComponent(TOKEN); };
 $("#bcast").onclick=async()=>{ const d=await act("/api/web/cast",{}); if(d) note(d.message,true); };
-$("#kbd").onclick=()=>{ const k=$("#kb"); k.classList.toggle("on"); if(k.classList.contains("on")) $("#kbtext").focus(); else $("#kbtext").blur(); };
-async function kbSend(){ const i=$("#kbtext"); if(!i.value) return true; const d=await act("/api/web/input",{type:"text",text:i.value}); if(d){ i.value=""; return true; } return false; }
-$("#kbsend").onclick=kbSend;
-$("#kbenter").onclick=async()=>{ if(await kbSend()) act("/api/web/input",{type:"key",name:"Enter"}); };
-$("#kbtext").addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); $("#kbenter").click(); } });
-(()=>{ const b=$("#kbdel"); let t1=0,t2=0; const fire=()=>act("/api/web/input",{type:"key",name:"Backspace"});
+// Typing: the bar's text goes to the page live, as you type (no Send button). Each change is turned into "delete n, type s",
+// and the changes are sent one at a time, in order, so fast typing can't arrive scrambled.
+const kbIn=$("#kbtext");
+let kbPrev="", kbQ=Promise.resolve();
+const kbOn=()=>$("#kb").classList.contains("on");
+function kbShow(on,focus){
+  $("#kb").classList.toggle("on",on); document.body.classList.toggle("kbon",on);
+  kbIn.value=""; kbPrev="";
+  if(on&&focus) kbIn.focus(); else if(!on) kbIn.blur();
+}
+function kbSend(body){ kbQ=kbQ.then(()=>act("/api/web/input",body)); return kbQ; }
+function kbSync(){
+  const now=Array.from(kbIn.value), was=Array.from(kbPrev); let i=0;
+  while(i<now.length&&i<was.length&&now[i]===was[i]) i++;
+  const back=was.length-i, add=now.slice(i).join(""); kbPrev=kbIn.value;
+  if(back||add) kbSend({type:"edit",back,text:add});
+}
+kbIn.addEventListener("input",kbSync);
+function kbEnter(){ kbIn.value=""; kbPrev=""; kbSend({type:"key",name:"Enter"}); }
+kbIn.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); kbEnter(); } });
+$("#kbd").onclick=()=>{ if(kbOn()) kbShow(false); else kbShow(true,true); };
+$("#kbclose").onclick=()=>kbShow(false);
+// pressing a bar button must not take the focus (and so the phone's keyboard) away from the text box
+// (mousedown only: cancelling touchstart would stop the tap from ever becoming a click on iOS)
+$$("#kb button").forEach(b=>b.addEventListener("mousedown",e=>e.preventDefault()));
+$("#kbenter").onclick=kbEnter;
+(()=>{ const b=$("#kbdel"); let t1=0,t2=0;
+  const fire=()=>{ if(kbIn.value){ kbIn.value=Array.from(kbIn.value).slice(0,-1).join(""); kbSync(); } else kbSend({type:"key",name:"Backspace"}); };
   const stop=()=>{clearTimeout(t1);clearInterval(t2);};
-  b.addEventListener("pointerdown",e=>{ e.preventDefault(); fire(); t1=setTimeout(()=>{t2=setInterval(fire,110);},380); });
+  b.addEventListener("pointerdown",()=>{ fire(); t1=setTimeout(()=>{t2=setInterval(fire,90);},380); });
   ["pointerup","pointerleave","pointercancel"].forEach(ev=>b.addEventListener(ev,stop)); })();
+// The bar comes up by itself when the page puts the cursor in a text box (tap the bar once and the keyboard follows),
+// and goes away when the page stops asking for text.
+let kbEditing=false, kbGone=0;
+function kbFollow(editing){
+  if(editing){ kbGone=0; if(!kbEditing&&!kbOn()) kbShow(true,false); }
+  else if(kbEditing&&kbOn()&&++kbGone>=2) kbShow(false);
+  if(editing||kbGone>=2||!kbOn()) kbEditing=editing;
+}
 
 // touch: a tap clicks, a drag scrolls (and keeps coasting when you let go)
 let touch=null, acc={dx:0,dy:0,x:0,y:0}, busy=false, fling=0;
@@ -908,12 +980,16 @@ async function flush(){
   busy=false; if(acc.dx||acc.dy) flush();
 }
 function scrollBy(dx,dy,x,y){ acc.dx+=dx; acc.dy+=dy; acc.x=x; acc.y=y; flush(); }
+// The typing bar sits on top of the picture: touches on it are the phone's own (focus, taps), never the page's.
+const inKb=e=>!!(e.target&&e.target.closest&&e.target.closest("#kb"));
 view.addEventListener("touchstart",e=>{
+  if(inKb(e)){ touch=null; return; }
   e.preventDefault(); clearInterval(fling);
   if(e.touches.length!==1){ touch=null; return; }
   const p=at(e.touches[0]); touch={x0:p.x,y0:p.y,lx:p.x,ly:p.y,moved:false,hist:[]};
 },{passive:false});
 view.addEventListener("touchmove",e=>{
+  if(inKb(e)) return;
   e.preventDefault(); if(!touch||e.touches.length!==1) return;
   const p=at(e.touches[0]);
   if(!touch.moved&&Math.hypot(p.x-touch.x0,p.y-touch.y0)<10*Math.max(sx,sy)) return;
@@ -922,6 +998,7 @@ view.addEventListener("touchmove",e=>{
   scrollBy(dx,dy,p.x,p.y);
 },{passive:false});
 view.addEventListener("touchend",e=>{
+  if(inKb(e)) return;
   e.preventDefault(); const t=touch; touch=null; if(!t) return;
   if(!t.moved){ act("/api/web/input",{type:"tap",x:t.x0,y:t.y0}); return; }
   const now=performance.now(), recent=t.hist.filter(h=>now-h[0]<90); if(!recent.length) return;
