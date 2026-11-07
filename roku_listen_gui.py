@@ -5,6 +5,7 @@ scaled by the volume slider in Python (audioop) and played with sounddevice, so 
 """
 import asyncio
 import base64
+import collections
 import ctypes
 import io
 import audioop
@@ -31,6 +32,7 @@ from PIL import Image, ImageOps, ImageTk
 import websockets
 
 import discord_presence
+import health
 import phone_remote
 import phone_store
 import tv_apps
@@ -62,6 +64,9 @@ def log(msg):
 
 
 SILENCE_AFTER = 3.0     # seconds without audio packets before the status says so
+SOUND_DELAY_MAX = 1500  # the Sound delay slider's top end, ms
+BUFFER_MS = 300         # sound held back before playing: the TV's Wi-Fi pauses for up to about 250 ms every 10 s
+MAX_FILL = 100          # a longer gap (a second of 10 ms packets) is an outage, not something to paper over
 DEVICE_RETRY = 30.0     # seconds to keep trying to reopen a lost audio output before giving up
 
 
@@ -89,6 +94,117 @@ def find_output_device(name):
         return None
 
 
+def filler_packets(prev, packet):
+    """RTP packets standing in for the ones lost between `prev` and `packet`, so the decoder produces a frame for each
+    and the sound keeps its length instead of shrinking by what the network dropped.
+
+    Each carries only the Opus TOC byte of the packet before the gap (code 0, an empty frame), which libopus treats as a
+    lost frame: it conceals it rather than leaving a hole. The RTP timestamps are spread evenly between the two real
+    packets; they don't have to divide exactly (the Roku's often don't), since the decoder counts frames, not times.
+    [] if nothing is missing, if `packet` is out of order, or if the gap is too long to be worth filling."""
+    missing = ((int.from_bytes(packet[2:4], "big") - int.from_bytes(prev[2:4], "big")) & 0xFFFF) - 1
+    if missing < 1 or missing > MAX_FILL or len(prev) <= 12:
+        return []
+    t0 = int.from_bytes(prev[4:8], "big")
+    span = (int.from_bytes(packet[4:8], "big") - t0) & 0xFFFFFFFF
+    step = span // (missing + 1) if 0 < span < 0x80000000 else 480        # 480 = 10 ms at 48 kHz
+    seq = int.from_bytes(prev[2:4], "big")
+    toc = bytes([prev[12] & 0xFC])
+    return [prev[:2] + ((seq + i) & 0xFFFF).to_bytes(2, "big") + ((t0 + i * (step or 480)) & 0xFFFFFFFF).to_bytes(4, "big")
+            + prev[8:12] + toc for i in range(1, missing + 1)]
+
+
+_LIBOPUS = {}
+
+
+def has_libopus(ffmpeg):
+    """Whether this FFmpeg can decode Opus with libopus (checked once)."""
+    if ffmpeg not in _LIBOPUS:
+        try:
+            out = subprocess.run([ffmpeg, "-hide_banner", "-decoders"], capture_output=True, text=True, timeout=10,
+                                 creationflags=NO_WINDOW).stdout
+            _LIBOPUS[ffmpeg] = any(line.split()[1:2] == ["libopus"] for line in out.splitlines() if line.strip())
+        except Exception:
+            _LIBOPUS[ffmpeg] = False
+    return _LIBOPUS[ffmpeg]
+
+
+def decoder_command(ffmpeg, sdp_path, codec="libopus"):
+    """FFmpeg reading the Roku's RTP from `sdp_path` and writing raw PCM to stdout. `codec` picks the Opus decoder:
+    only libopus conceals lost frames, FFmpeg's own decoder doesn't."""
+    return [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning", "-protocol_whitelist", "file,udp,rtp",
+            "-fflags", "nobuffer", "-flags", "low_delay"] + (["-c:a", codec] if codec else []) +            ["-i", sdp_path, "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]
+
+
+class AudioBuffer:
+    """Decoded audio waiting for the sound card, so a pause in the stream (the TV's Wi-Fi hiccups for about a quarter of
+    a second every few seconds) is covered by what's already queued instead of being heard as a gap.
+
+    A reader thread moves FFmpeg's output in. Playing starts once `target_ms` is queued, and after running dry it waits
+    to refill before starting again (counted as an underrun). The TV's clock and the sound card's never match exactly,
+    so anything more than `spill_ms` above the target is dropped, oldest first."""
+
+    def __init__(self, read, target_ms, stop_evt, spill_ms=150):
+        self.read, self.stop_evt = read, stop_evt
+        self.target, self.spill = max(0, target_ms) / 1000, spill_ms / 1000
+        self.q, self.cond = collections.deque(), threading.Condition()
+        self.eof = self.primed = False
+        self.underruns = self.dropped = 0
+        threading.Thread(target=self._fill, name="audio-buffer", daemon=True).start()
+
+    def level(self):
+        """Seconds of audio queued."""
+        return len(self.q) * CHUNK / (48000 * 4)
+
+    def finished(self):
+        return self.eof and not self.q
+
+    def retarget(self, seconds):
+        """Change how much is held back, while playing. More: it goes quiet for the difference and resumes later (the
+        sound is now later). Less: what is queued beyond the new amount is dropped (the sound is now earlier)."""
+        with self.cond:
+            self.target = max(0.0, seconds)
+            if self.level() < self.target and self.q:
+                self.primed = False                       # wait for the extra, without counting an underrun
+            while self.level() > self.target + self.spill:
+                self.q.popleft()
+                self.dropped += 1
+            self.cond.notify_all()
+
+    def _fill(self):
+        while not self.stop_evt.is_set():
+            try:
+                buf = self.read(CHUNK)
+            except Exception:                  # the pipe closed under us (ffmpeg gone, session ending)
+                buf = b""
+            with self.cond:
+                if not buf:
+                    self.eof = True
+                    self.cond.notify_all()
+                    return
+                self.q.append(buf)
+                while self.level() > self.target + self.spill:
+                    self.q.popleft()
+                    self.dropped += 1
+                self.cond.notify_all()
+
+    def get(self, timeout=0.1):
+        """The next chunk to play, or None if there isn't one yet (still filling, or the stream has ended: see finished())."""
+        end = time.monotonic() + timeout
+        with self.cond:
+            while True:
+                if self.q and (self.primed or self.level() >= self.target or self.eof):
+                    self.primed = True
+                    return self.q.popleft()
+                if self.primed and not self.q and not self.eof:
+                    self.primed = False
+                    self.underruns += 1
+                left = end - time.monotonic()
+                if left <= 0 or self.finished():
+                    return None
+                self.cond.wait(left)
+
+
 class RtpStats:
     """Counts what actually arrives from the Roku, by RTP sequence number, so a dropout can be told apart as lost on
     the network (gaps here too) or lost after it reached this app (gaps only in FFmpeg's log)."""
@@ -98,7 +214,7 @@ class RtpStats:
         self.reset()
 
     def reset(self):
-        self.packets = self.lost = self.gaps = self.reordered = 0
+        self.packets = self.lost = self.gaps = self.reordered = self.concealed = 0
         self.longest_pause, self._at = 0.0, None
 
     def packet(self, seq, now):
@@ -118,7 +234,7 @@ class RtpStats:
 
     def report(self):
         text = (f"rtp: {self.packets} packets, {self.lost} missing in {self.gaps} gaps, {self.reordered} late/duplicate, "
-                f"longest pause {self.longest_pause * 1000:.0f} ms")
+                f"longest pause {self.longest_pause * 1000:.0f} ms, {self.concealed} concealed")
         self.reset()
         return text
 
@@ -191,12 +307,16 @@ class Remote:
             body["playlistId"] = playlist_id
         if timestamp > 3:
             body["timestamp"] = int(timestamp)
+        # Playlet answers slowly while it loads a video; a 3 s limit made a busy PC/TV report failure for a cast that
+        # went through, and the retry then reloaded the video a second time.
         send = lambda: cls._open(f"http://{host}:8888/api/queue/play", data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json", "X-Playlet": "1"})
+                                 headers={"Content-Type": "application/json", "X-Playlet": "1"}, timeout=8)
         try:
             send()
         except urllib.error.HTTPError:
             raise
+        except TimeoutError:
+            raise            # Playlet took the request and is slow to answer: sending it again would load the video twice
         except OSError:
             # Playlet's server only runs while Playlet is on screen. After a Web-tab cast (or any other app) the
             # TV is somewhere else, so open Playlet and try once more.
@@ -380,6 +500,12 @@ class CastSync:
     nudging the PC is instant, re-seeking the TV never is.
     """
 
+    health = None   # health.Health, set by the app: counts reloads for the connection health panel
+
+    def _count(self, skipped, detail):
+        if self.health:
+            self.health.reload(skipped, detail)
+
     SETTLE = 3.0    # after a (re)load Playlet still reports the previous stream's state for a moment
     DRIFT = 0.6     # seconds of PC-vs-TV difference worth correcting
     RECHECK = 20.0  # seconds between drift checks while both are playing
@@ -431,7 +557,15 @@ class CastSync:
         host, kind = self.host_fn(), ev.get("kind")
         log(f"sync {kind} {ev.get('id')} t={ev.get('t')}")
         if kind == "load":
+            if self._already_playing(host, ev["id"], ev.get("t", 0)):
+                log("sync load skipped: the TV is already playing this video at about this point")
+                self._count(True, f"load {ev.get('id')} at {ev.get('t', 0):.0f}s")
+                self.title = ev.get("title") or ev["id"]
+                self._announce(self.title, self.current)
+                self._align(host)
+                return
             t0 = time.time()
+            self._count(False, f"load {ev.get('id')} at {ev.get('t', 0):.0f}s")
             Remote.cast(host, ev["id"], ev.get("t", 0), ev.get("list"))
             self.title, self.current = ev.get("title") or ev["id"], ev["id"]
             self._announce(self.title, self.current)
@@ -447,6 +581,7 @@ class CastSync:
             paused = ev.get("paused")
             target = max(0.0, ev.get("t", 0) + (0 if paused else self.lead))
             t0 = time.time()
+            self._count(False, f"seek {ev.get('id')} to {target:.0f}s")
             Remote.cast(host, ev["id"], target)   # Playlet seeks by replaying at a timestamp
             self.settle_until = t0 + self.SETTLE
             if paused:
@@ -468,6 +603,20 @@ class CastSync:
                 self.on_now(title, video_id)
             except Exception as e:
                 log(f"on_now failed: {e!r}")
+
+    ALREADY = 12.0  # a "load" this close to where the TV already is, for the same video, is not worth a reload
+
+    def _already_playing(self, host, video_id, t):
+        """True if the TV is already playing `video_id` near `t`. Reloading it in Playlet is a 2-3 s rebuffer, so a
+        repeated "load" (the page re-announcing a video that is already on the TV) must not cost one."""
+        if video_id != self.current:
+            return False
+        st = Remote.state(host)
+        if not st or st["app"] != "Playlet" or st["state"] not in ("play", "pause", "buffer"):
+            return False
+        if abs(st["pos"] - t) > self.ALREADY:
+            return False
+        return Remote.playlet_now(host).get("videoid") == video_id
 
     def _started(self, host, target, t0):
         """Wait (abandoning it if a newer event arrives) until the TV is really playing near target; learn the lead."""
@@ -590,8 +739,13 @@ class TvVolume:
 class Listener:
     """One private-listening session: websocket + RTP socket + ffmpeg decoder + audio output."""
 
-    def __init__(self, host, delay_ms, on_status):
+    def __init__(self, host, delay_ms, on_status, buffer_ms=0):
+        # `delay` is what the Roku is asked to buffer on its side (VDLY). The sound buffer here is separate and adds to it:
+        # the sound reaches the speakers about delay + buffer behind the TV's own clock.
         self.host, self.delay_us, self.on_status = host, delay_ms * 1000, on_status
+        self.buffer_ms, self.buffer, self.concealing = buffer_ms, None, False
+        self.out_latency = 0.0                             # seconds the sound card itself holds
+        self.stats, self.last_report = None, ""
         self.volume = 1.0
         self.device, self.reopen = "", False   # output device name ('' = system default); reopen: switch it live
         self.stop_evt = threading.Event()
@@ -622,10 +776,11 @@ class Listener:
         f.write(SDP)
         f.close()
         self.sdp_path = f.name
+        self.concealing = has_libopus(ffmpeg)
+        log("decoder: " + ("libopus, lost packets are concealed" if self.concealing
+                           else "FFmpeg's own Opus decoder (no libopus): lost packets leave gaps"))
         self.proc = subprocess.Popen(
-            [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning", "-protocol_whitelist", "file,udp,rtp",
-             "-fflags", "nobuffer", "-flags", "low_delay", "-i", self.sdp_path,
-             "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"],
+            decoder_command(ffmpeg, self.sdp_path, "libopus" if self.concealing else ""),
             # its own file: a child's inherited handle doesn't really append on Windows, so it overwrites log() lines
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=open(LOG + ".ffmpeg", "w"), creationflags=NO_WINDOW)
 
@@ -659,8 +814,9 @@ class Listener:
         self.sock.settimeout(0.5)
         started, last_rr, last_pkt, count = False, 0.0, time.monotonic(), 0
         silent = False
-        stats = RtpStats()
+        stats = self.stats = RtpStats()
         last_report = time.monotonic()
+        prev = None                            # the last packet that moved forward, to fill any gap after it
 
         def send(data, addr, sock=self.sock):
             # Windows reports an earlier send to a closed port as an error on the next receive, and a send can fail
@@ -679,7 +835,10 @@ class Listener:
                 last_rr = now
             if started and now - last_report >= 60:
                 last_report = now
-                log(stats.report())
+                buf = self.buffer
+                self.last_report = stats.report() + (f", buffer {buf.level() * 1000:.0f} ms, {buf.underruns} underruns, "
+                                                     f"{buf.dropped} dropped" if buf else "")
+                log(self.last_report)
             try:
                 data, _ = self.sock.recvfrom(2048)
             except socket.timeout:
@@ -701,9 +860,16 @@ class Listener:
             last_pkt, count = time.monotonic(), count + 1
             stats.packet(int.from_bytes(data[2:4], "big"), last_pkt)
             try:
+                if self.concealing and prev is not None:
+                    fill = filler_packets(prev, data)
+                    for f in fill:                 # stand-ins for what the network lost, so the sound stays on time
+                        fwd.sendto(f, ("127.0.0.1", FFPLAY_PORT))
+                    stats.concealed += len(fill)
                 fwd.sendto(data, ("127.0.0.1", FFPLAY_PORT))
             except OSError:
                 pass
+            if prev is None or ((int.from_bytes(data[2:4], "big") - int.from_bytes(prev[2:4], "big")) & 0xFFFF) < 0x8000:
+                prev = data
             if silent:
                 silent = False
                 self.on_status("Connected - playing")
@@ -720,15 +886,21 @@ class Listener:
         """Decoded audio to the speakers. If the output device goes away (unplugged, driver reset, a sleep/wake) it
         is reopened for up to DEVICE_RETRY seconds instead of ending the session."""
         gave_up_at = None
+        if self.buffer is None:
+            self.buffer = AudioBuffer(lambda n: self.proc.stdout.read(n), self.buffer_ms, self.stop_evt)
         while not self.stop_evt.is_set():
             try:
                 with sd.RawOutputStream(samplerate=48000, channels=2, dtype="int16", blocksize=960, latency="low",
                                         device=self.device_index()) as out:
                     gave_up_at = None
                     self.reopen = False
+                    self.out_latency = float(getattr(out, "latency", 0) or 0)
+                    self.buffer.retarget(self.buffer_ms / 1000)
                     while not self.stop_evt.is_set() and not self.reopen:
-                        buf = self.proc.stdout.read(CHUNK)
-                        if not buf:
+                        buf = self.buffer.get()
+                        if buf is None:
+                            if not self.buffer.finished():
+                                continue                 # still filling: look at stop / reopen again
                             if not self.stop_evt.is_set():
                                 log(f"ffmpeg exited rc={self.proc.poll()}")
                                 self._fail("Audio decoder stopped - see RokuListen.log in %APPDATA%")
@@ -752,6 +924,12 @@ class Listener:
                 self.stop_evt.wait(1.5)
                 if not self.stop_evt.is_set():
                     self.on_status("Connected - playing")
+
+    def set_buffer(self, ms):
+        """Move the sound earlier or later right now (from the Sound delay slider)."""
+        self.buffer_ms = max(0, int(ms))
+        if self.buffer is not None:
+            self.buffer.retarget(self.buffer_ms / 1000)
 
     def device_index(self):
         """The saved output device's index, or None for the system default (also when it isn't plugged in now)."""
@@ -1520,6 +1698,20 @@ class PhoneBackend:
             self._apps, self._apps_at = Remote.apps(self.app._host), time.time()
         return self._apps
 
+    def playlet(self):
+        """Where the phone's YouTube tab finds Playlet's web app, and whether the Roku is serving it right now (it only
+        does while Playlet is open on the TV). The phone loads it straight from the Roku, so its address is the Roku's."""
+        host = self.app._host
+        up, account = False, ""
+        try:
+            data = json.loads(Remote._open(f"http://{host}:8888/api/profiles", timeout=1.5))
+            up = True
+            now = next((p for p in data.get("profiles", []) if p.get("id") == data.get("currentProfile")), {})
+            account = now.get("username") or ""        # whose feed Playlet is showing (it is the TV's profile too)
+        except Exception:
+            pass
+        return {"up": up, "url": f"http://{host}:8888/", "id": PLAYLET_ID, "account": account}
+
     def icon(self, app_id):
         if app_id not in self._icons:
             self._icons[app_id] = Remote.icon(self.app._host, app_id)
@@ -1558,6 +1750,9 @@ class PhoneBackend:
     def web_cast(self):
         return self.app.web.phone_cast()
 
+    def web_youtube(self, on, go):
+        self.app.web.phone_youtube(on, go)
+
     def web_transport(self, action, value):
         self.app.web.phone_transport(action, value)
 
@@ -1567,9 +1762,108 @@ class PhoneBackend:
     def web_bookmark(self, action, url):
         return self.app.web.phone_bookmark(action, url)
 
+    def web_continue(self, action, url):
+        return self.app.web.phone_continue(action, url)
+
     def stop_cast(self):
         web = self.app.web
         self.app.after(0, lambda: web.cancel_cast() if web.busy else web.stop_casting())
+
+
+class HealthWindow(tk.Toplevel):
+    """The connection health panel: one row each for the TV, Playlet, the YouTube link, the audio and recent stalls,
+    refreshed every second, with a button that copies the lot as text."""
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Connection health")
+        self.configure(bg=BG)
+        self.geometry("560x560")
+        self.minsize(460, 420)
+        tk.Label(self, text="Connection health", bg=BG, fg=FG, font=(FONT, 16, "bold")).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(self, text="The last 30 minutes. A stall names who froze: this app, the browser, or the link between them.",
+                 bg=BG, fg=MUTED, font=(FONT, 9), wraplength=520, justify="left").pack(anchor="w", padx=18, pady=(0, 10))
+        card = tk.Frame(self, bg=CARD, highlightbackground=EDGE, highlightthickness=1)
+        card.pack(fill="x", padx=18)
+        self.rows = {}
+        for key, label in (("tv", "TV"), ("playlet", "Playlet"), ("sync", "YouTube sync"), ("buffer", "TV buffering"),
+                           ("stalls", "Stalls"), ("audio", "Audio")):
+            row = tk.Frame(card, bg=CARD)
+            row.pack(fill="x", padx=14, pady=5)
+            dot = tk.Canvas(row, width=10, height=10, bg=CARD, highlightthickness=0)
+            dot.pack(side="left", pady=2)
+            item = dot.create_oval(1, 1, 9, 9, fill=GREY, outline="")
+            tk.Label(row, text=label, bg=CARD, fg=MUTED, font=(FONT, 10), width=13, anchor="w").pack(side="left", padx=(8, 0))
+            text = tk.Label(row, bg=CARD, fg=FG, font=(FONT, 10), anchor="w", justify="left", wraplength=340)
+            text.pack(side="left", fill="x", expand=True)
+            self.rows[key] = (dot, item, text)
+        tk.Label(self, text="Recent", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", padx=18, pady=(12, 2))
+        self.recent = tk.Label(self, bg=BG, fg=FG, font=("Consolas", 9), anchor="nw", justify="left", wraplength=520)
+        self.recent.pack(fill="both", expand=True, padx=18)
+        RoundButton(self, "Copy report", self.copy, width=140, height=36).pack(anchor="e", padx=18, pady=12)
+        self._playlet = ("", 0.0)             # (answer, when asked): Playlet's own server only answers while it is on screen
+        self._asking = False
+        self.after(50, self.refresh)
+
+    def copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.app.health_report())
+
+    def _ask_playlet(self):
+        if self._asking or time.time() - self._playlet[1] < 5:
+            return
+        self._asking = True
+        host = self.app._host
+
+        def run():
+            try:
+                Remote._open(f"http://{host}:8888/api/state", timeout=2)
+                answer = "answering"
+            except Exception:
+                answer = "not answering"
+            self._playlet = (answer, time.time())
+            self._asking = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set(self, key, color, text):
+        dot, item, label = self.rows[key]
+        dot.itemconfigure(item, fill=color)
+        label.config(text=text)
+
+    def refresh(self):
+        try:
+            h = self.app.health.snapshot()
+            self._ask_playlet()
+            if h["tv_ok"] is None:
+                self._set("tv", GREY, "Not checked yet")
+            elif h["tv_ok"]:
+                slow = h["tv_ms"] > 400
+                self._set("tv", AMBER if slow else GREEN,
+                          f"Answering in {h['tv_ms']:.0f} ms" + ("  ·  slow" if slow else "") +
+                          (f"  ·  went quiet {h['tv_down']}x" if h["tv_down"] else ""))
+            else:
+                self._set("tv", RED, "Not answering. Is the TV on and on the same Wi-Fi?")
+            app = h["tv_app"] or "nothing"
+            playlet = self._playlet[0]
+            self._set("playlet", GREEN if h["tv_app"] == "Playlet" else GREY,
+                      f"On the TV now: {app} ({h['tv_state']})" + (f"  ·  its server is {playlet}" if playlet else ""))
+            self._set("sync", AMBER if h["reloads"] > 4 else GREEN if self.app.bridge.connected() else GREY,
+                      f"{h['reloads']} reloads, {h['reloads_skipped']} avoided" +
+                      ("" if self.app.bridge.connected() else "  ·  YouTube tab not connected"))
+            self._set("buffer", AMBER if h["buffers"] > 2 else GREEN,
+                      f"{h['buffers']} times, {h['buffer_seconds']:.0f} s in all" if h["buffers"] else "None")
+            st = h["stalls"]
+            total = st["app"] + st["browser"] + st["link"] + st["unknown"]
+            self._set("stalls", AMBER if total else GREEN,
+                      "None" if not total else f"this app {st['app']}  ·  browser {st['browser']}  ·  "
+                                               f"extension link {st['link']}  ·  unknown {st['unknown']}")
+            self._set("audio", *self.app.audio_health())
+            self.recent.config(text="\n".join(f"{ago:4.0f}s ago  {k:15s} {d}"[:110] for ago, k, d in h["recent"]) or
+                               "Nothing has gone wrong in the last 30 minutes.")
+        except Exception as e:
+            log(f"health panel: {e!r}")
+        self.after(1000, self.refresh)
 
 
 class App(tk.Tk):
@@ -1584,6 +1878,7 @@ class App(tk.Tk):
         self.listener = None
         self.host = tk.StringVar(value=cfg.get("host", DEFAULT_HOST))
         self.delay = tk.StringVar(value=str(cfg.get("delay", 500)))
+        self.buffer = tk.StringVar(value=str(cfg.get("buffer", BUFFER_MS)))
         self.status = tk.StringVar(value="Not connected")
         self.audio_device = cfg.get("audio_device", "")
         # worker threads read the Roku IP from here (Tk variables aren't thread-safe)
@@ -1604,7 +1899,11 @@ class App(tk.Tk):
         self.sync = None   # created once the bridge exists
         self.bridge = Bridge(log)
         self.bridge.settings["autocast"] = self.autocast
+        self.health = health.Health(log=log)
+        self.bridge.on_poll = lambda gap, rtt: self.health.page_poll(gap, rtt)
         self.sync = CastSync(lambda: self._host, self.bridge, self._yt_now)
+        self.sync.health = self.health
+        self._watchdog()
         self.bridge.on_event = lambda ev: self.sync.push(ev) if self.autocast else None
         self.bridge_error = False
         try:
@@ -1819,8 +2118,19 @@ class App(tk.Tk):
         self.mute_lbl.bind("<Button-1>", lambda e: self.tvvol.toggle_mute())
         self.pc_volume = int(self._load().get("volume", 100))
         self.scale = Slider(col, 0, 200, self.pc_volume, self._on_volume)
-        self.scale.pack(pady=(4, 18))
+        self.scale.pack(pady=(4, 10))
         self._refresh_volume()
+
+        # Lip-sync: how late the sound plays, live. Drag it while watching until the lips match.
+        srow = tk.Frame(col, bg=BG)
+        srow.pack(fill="x")
+        tk.Label(srow, text="Sound delay", bg=BG, fg=MUTED, font=(FONT, 10)).pack(side="left")
+        self.sound_label = tk.Label(srow, bg=BG, fg=FG, font=(FONT, 10, "bold"))
+        self.sound_label.pack(side="right")
+        self.sound_scale = Slider(col, 0, SOUND_DELAY_MAX, self._buffer(), self._on_sound_delay)
+        self.sound_scale.mark = None
+        self.sound_scale.pack(pady=(4, 10))
+        self.sound_label.config(text=f"{self._buffer()} ms")
 
         orow = tk.Frame(col, bg=BG)
         orow.pack(fill="x")
@@ -1834,9 +2144,15 @@ class App(tk.Tk):
         self.out_lbl.pack(fill="x", ipady=5, pady=(3, 0))
         self.out_lbl.bind("<Button-1>", self._pick_output)
         self._paint_output()
+        self.buffer_hint = tk.Label(col, text="", bg=BG, fg=AMBER, font=(FONT, 9), anchor="w")
+        self.buffer_hint.pack(fill="x", pady=(6, 0))
+        self._paint_buffer_hint()
         phone = tk.Label(col, text="Phone remote", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
         phone.pack(anchor="w", pady=(14, 0))
         phone.bind("<Button-1>", lambda e: self.open_phone())
+        healthlink = tk.Label(col, text="Connection health", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
+        healthlink.pack(anchor="w", pady=(6, 0))
+        healthlink.bind("<Button-1>", lambda e: self.open_health())
 
     def _build_youtube(self, page):
         self.yt_page = page
@@ -1951,7 +2267,10 @@ class App(tk.Tk):
                           f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg", image_text=name or title)
 
     def on_tv_state(self, st):
-        """From the 1 s poll: if the TV has left Playlet, the YouTube status comes down."""
+        """From the 1 s poll: if the TV has left Playlet, the YouTube status comes down. If it is playing something the
+        status doesn't know about (started from the phone), that goes up."""
+        if st and st["app"] == "Playlet" and st["state"] in ("play", "pause", "buffer") and self.discord.is_on("youtube"):
+            self._adopt_playlet()
         if self.discord.showing != "youtube" or st is None:
             self._yt_gone = 0
             return
@@ -1962,6 +2281,25 @@ class App(tk.Tk):
         if self._yt_gone >= 2:
             self._yt_gone = 0
             self.discord.clear("youtube")
+
+    ADOPT_EVERY = 5.0            # seconds between looks at what Playlet is playing
+
+    def _adopt_playlet(self):
+        """A video can reach Playlet without the YouTube tab: the phone's YouTube tab, a YouTube link sent from the phone,
+        or someone using the TV's remote. CastSync only hears about what the Chrome extension sends, so those never got a
+        Discord status. Every few seconds, while the TV is in Playlet, ask it what's on and show that if it isn't up."""
+        now = time.time()
+        if now - getattr(self, "_yt_adopt_at", 0.0) < self.ADOPT_EVERY:
+            return
+        self._yt_adopt_at = now
+        threading.Thread(target=self._yt_adopt, daemon=True).start()
+
+    def _yt_adopt(self):
+        np = Remote.playlet_now(self._host)               # {} if Playlet isn't answering
+        vid = np.get("videoid") or ""
+        if vid and (vid != getattr(self, "_yt_id", None) or self.discord.showing != "youtube"):
+            log(f"discord: Playlet is playing {vid}, which the YouTube tab didn't start; showing it")
+            self._yt_now(np.get("title") or "", vid)
 
     def autocast_off(self):
         """A Web-tab cast owns the TV now; stop the YouTube tab's auto-cast from taking it back."""
@@ -1988,7 +2326,24 @@ class App(tk.Tk):
         self.play_btn.set_kind("pause" if self.play_state == "play" else "play")
         self._remote(Remote.key, "Play")
 
+    def _watchdog(self):
+        """Notices when this app itself freezes (a thread that sleeps a quarter second and wakes much later was starved),
+        so a stall seen from the YouTube page can be blamed on the right side."""
+        def run():
+            while True:
+                t = time.monotonic()
+                time.sleep(0.25)
+                late = time.monotonic() - t - 0.25
+                if late >= health.APP_LATE:
+                    self.health.app_late(late)
+        threading.Thread(target=run, name="watchdog", daemon=True).start()
+
     def _poll(self):
+        now = time.monotonic()
+        due = getattr(self, "_poll_due", None)
+        if due is not None and now - due >= health.APP_LATE:      # the window's own loop was kept waiting
+            self.health.app_late(now - due)
+        self._poll_due = now + 1.0
         if not self._polling:
             self._polling = True
             host = self.host.get().strip() or DEFAULT_HOST
@@ -1997,7 +2352,11 @@ class App(tk.Tk):
         self.after(1000, self._poll)
 
     def _fetch(self, host):
+        t0 = time.monotonic()
         st = Remote.state(host)
+        self.health.tv_poll(st is not None, (time.monotonic() - t0) * 1000)
+        if st:
+            self.health.tv_playing(st["state"], st["app"])
         try:
             self.after(0, self._show_state, st)
         except RuntimeError:  # window already closed
@@ -2116,7 +2475,8 @@ class App(tk.Tk):
     def _save(self):
         try:
             with open(CONFIG, "w", encoding="utf-8") as f:
-                json.dump({"host": self.host.get().strip(), "delay": self._delay(), "volume": self.pc_volume,
+                json.dump({"host": self.host.get().strip(), "delay": self._delay(), "buffer": self._buffer(),
+                           "volume": self.pc_volume,
                            "autocast": self.autocast, "audio_device": getattr(self, "audio_device", ""),
                            "quick_apps": getattr(getattr(self, "apps_row", None), "pins", None),
                            "web_home": getattr(getattr(self, "web", None), "home", None),
@@ -2161,6 +2521,32 @@ class App(tk.Tk):
             return self.phone.link(local_ip_for(self._host))
         except OSError:
             return self.phone.link("127.0.0.1")
+
+    def open_health(self):
+        win = getattr(self, "_health_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        self._health_win = HealthWindow(self)
+
+    def audio_health(self):
+        """(colour, text) for the panel's Audio row."""
+        ln = self.listener
+        if not ln:
+            return GREY, "Not connected"
+        st, buf = ln.stats, ln.buffer
+        if not st or not buf:
+            return AMBER, "Starting…"
+        text = (f"this minute: {st.lost} packets lost in {st.gaps} gaps, {st.concealed} concealed  ·  buffer "
+                f"{buf.level() * 1000:.0f} of {buf.target * 1000:.0f} ms  ·  {buf.underruns} underruns, {buf.dropped} dropped")
+        if not ln.concealing:
+            text += "  ·  no libopus: losses are not concealed"
+        return (AMBER if buf.underruns else GREEN), text
+
+    def health_report(self):
+        extra = [f"Audio: {self.audio_health()[1]}", f"Last audio minute: {self.listener.last_report or '-'}" if self.listener else "",
+                 f"YouTube tab connected: {self.bridge.connected()}", f"CapoCast extension polls seen: {self.health.polls}"]
+        return self.health.report(extra)
 
     def open_phone(self):
         """The Phone remote window: the on/off switch, the link as a QR code, and how to put it on the home screen."""
@@ -2268,6 +2654,29 @@ class App(tk.Tk):
         except ValueError:
             return 500
 
+    def _paint_buffer_hint(self):
+        b = self._buffer()
+        self.buffer_hint.config(text="" if b >= 250 else
+                                "Under 250 ms the TV's Wi-Fi pauses (about 1/4 s) can be heard as skips.")
+
+    def _on_sound_delay(self, value):
+        """The Sound delay slider moved: later sound for a bigger number, applied at once and remembered."""
+        ms = int(round(value / 10.0) * 10)
+        self.buffer.set(str(ms))
+        self.sound_label.config(text=f"{ms} ms")
+        self._paint_buffer_hint()
+        if self.listener:
+            self.listener.set_buffer(ms)
+        if getattr(self, "_sound_save", None):
+            self.after_cancel(self._sound_save)
+        self._sound_save = self.after(800, self._save)             # not on every pixel of the drag
+
+    def _buffer(self):
+        try:
+            return max(0, min(SOUND_DELAY_MAX, int(self.buffer.get())))
+        except ValueError:
+            return BUFFER_MS
+
     def _after_safe(self, fn):
         try:
             self.after(0, fn)          # from a worker thread: hop to the Tk thread
@@ -2331,7 +2740,7 @@ class App(tk.Tk):
             self.connect()
 
     def connect(self):
-        listener = Listener(self.host.get().strip() or DEFAULT_HOST, self._delay(), self.set_status)
+        listener = Listener(self.host.get().strip() or DEFAULT_HOST, self._delay(), self.set_status, self._buffer())
         listener.volume = self.pc_volume / 100
         listener.device = self.audio_device
         self.btn.style("Connecting…", ACCENT, ACCENT_HI, enabled=False)

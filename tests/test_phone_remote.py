@@ -90,6 +90,17 @@ class Server(unittest.TestCase):
             self.assertEqual(self.call(path, body, token="wrong")[0], 401, path)
         self.assertEqual(self.backend.calls, [])
 
+    def test_the_youtube_tab_asks_where_playlet_is(self):
+        self.assertEqual(self.call("/api/playlet", token=None)[0], 401)
+        self.srv.backend = type("B", (), {"playlet": lambda s: {"up": True, "url": "http://10.0.0.9:8888/", "id": "693751"}})()
+        code, body = self.call("/api/playlet")
+        self.assertEqual((code, json.loads(body)["url"]), (200, "http://10.0.0.9:8888/"))
+
+    def test_the_page_has_a_youtube_tab_with_playlet_settings_behind_it(self):
+        _, page = self.call("/?k=secret-token", token=None)
+        for needle in (b'data-tab="yt"', b'id="plframe"', b"/api/playlet", b"/api/web/youtube"):
+            self.assertIn(needle, page)
+
     def test_the_token_can_ride_in_the_url_for_images(self):
         code, body = self.call("/api/icon/12?k=secret-token", token=None)
         self.assertEqual((code, body), (200, b"\x89PNG"))

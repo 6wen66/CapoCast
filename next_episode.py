@@ -3,8 +3,9 @@
 A wrong guess takes over the TV, so this is cautious: the address must look like the same show, a new stream must have
 arrived, a full-length video must be playing steadily, and there's a countdown you can cancel. Pure logic, no Tk.
 """
+import re
 import time
-from urllib.parse import urldefrag
+from urllib.parse import parse_qsl, urldefrag, urljoin, urlparse
 
 from stream_finder import MIN_SECONDS, same_show
 
@@ -64,3 +65,47 @@ class NextEpisode:
         if self.fires_at is None:
             self.fires_at = now + self.COUNTDOWN
         return max(0.0, self.fires_at - now)
+
+
+def _numbers(url):
+    """Every number in the path and query, in order."""
+    p = urlparse(url)
+    return [int(n) for n in re.findall(r"\d+", p.path)] + [int(n) for _, v in parse_qsl(p.query) for n in re.findall(r"\d+", v)]
+
+
+def _is_next(current, other):
+    """`other` is the same show with exactly one number one higher (the episode), and nothing else different."""
+    a, b = _numbers(current), _numbers(other)
+    if len(a) != len(b) or not same_show(current, other):
+        return False
+    changed = [(x, y) for x, y in zip(a, b) if x != y]
+    return len(changed) == 1 and changed[0][1] == changed[0][0] + 1
+
+
+EXPLICIT = re.compile(r"(?i)((?:episode|ep|e)(?:[-_/=]|%20)?)(\d+)")
+
+
+def next_url(current, hrefs=()):
+    """The address of the episode after the one at `current`, or None if it can't be told.
+
+    The page's own links come first: one that is the same show with the episode number one higher. Failing that, an
+    address that spells the episode out ('episode-5', 'ep=5', '?e=5') gets 1 added. Anything vaguer is left alone,
+    because a guess that is wrong takes the TV somewhere unwanted."""
+    current = urldefrag(current)[0]
+    for h in hrefs or ():
+        try:
+            full = urldefrag(urljoin(current, str(h)))[0]
+        except ValueError:
+            continue
+        if full != current and full.startswith(("http://", "https://")) and _is_next(current, full):
+            return full
+    p = urlparse(current)
+    for part in ("path", "query"):
+        text = getattr(p, part)
+        matches = list(EXPLICIT.finditer(text))
+        if matches:
+            m = matches[-1]
+            guess = text[:m.start(2)] + str(int(m.group(2)) + 1) + text[m.end(2):]
+            out = urlparse(current)._replace(**{part: guess}).geturl()
+            return out if same_show(current, out) else None
+    return None

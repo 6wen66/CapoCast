@@ -28,9 +28,9 @@ import drm
 import subtitles
 import upscaler
 from media_relay import MediaRelay, probe_all
-from next_episode import NextEpisode
+from next_episode import NextEpisode, next_url
 from roku_listen import local_ip_for
-from stream_finder import Candidate, apply_page_videos, choose, score
+from stream_finder import MIN_SECONDS, Candidate, apply_page_videos, choose, score
 from web_guard import WebGuard, normalize_address
 from web_sync import WebSync
 from web_view import PageView, key_events
@@ -111,6 +111,7 @@ class WebTab:
         self.subs = str(subs or "").strip().lower()
         self.upscaled = None                              # what the TV's upscaled cast was made with, while there is one
         self.guard = WebGuard(ui.log, home=self.home)
+        self.guard.on_youtube = self._youtube_tapped
         self.proc = None
         self.relay = None
         self.sync = None                                  # follows the page's video on the TV after a cast
@@ -119,6 +120,8 @@ class WebTab:
         self.visible = self.busy = False
         self.attempt, self.cast_at = 0, 0.0               # which cast is current; a worker from an older one stands down
         self.next, self.cast_page = NextEpisode(), ""     # follows the page on to the next episode
+        self.cast_next, self.link_at = "", None           # the episode after the cast one (if known); where a resume starts
+        self._progress_at = 0.0                           # when Continue Watching was last written
         self.launched_at = 0.0
         self.filters_ok = True
         self.note, self.note_until = ("", ui.MUTED), 0.0
@@ -163,6 +166,9 @@ class WebTab:
         self.home_lbl = tk.Label(strip, text="Home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
         self.home_lbl.pack(side="right", padx=(0, 12))
         self.home_lbl.bind("<Button-1>", lambda e: self.go_home())
+        self.continue_lbl = tk.Label(strip, text="Continue", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
+        self.continue_lbl.pack(side="right", padx=(0, 12))
+        self.continue_lbl.bind("<Button-1>", self.show_continue)
         self.upscale_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
         self.upscale_lbl.pack(side="right", padx=(0, 12))
         self.upscale_lbl.bind("<Button-1>", lambda e: self.next_upscale())
@@ -230,6 +236,7 @@ class WebTab:
                 self.sync.stop(WebSync.BROWSER_GONE)
             self.guard.stop()
             self.guard = WebGuard(self.ui.log, home=self.home)         # fresh state for the new browser
+            self.guard.on_youtube = self._youtube_tapped
             self.view.reset()
             w, h = self.view.winfo_width(), self.view.winfo_height()
             self.guard.set_view(w if w > 50 else 1280, h if h > 50 else 700, self.visible)
@@ -486,6 +493,13 @@ class WebTab:
 
     def _following_stopped(self, reason):
         """Called from WebSync's thread when it gives up (page left, TV stopped, or you pressed Stop)."""
+        sync = self.sync
+        if sync is not None and not sync.live and sync.dur >= MIN_SECONDS and self.cast_page and reason:
+            seen = float(getattr(sync, "tv_seen", 0) or 0)
+            if reason == WebSync.FINISHED:
+                self._save_progress(self.cast_page, sync.dur, sync.dur, sync.title, finished=True)
+            elif seen > 0:
+                self._save_progress(self.cast_page, seen, sync.dur, sync.title)
         self._post(self.next.grace if reason in (WebSync.LEFT_PAGE, WebSync.FINISHED) else self.next.disarm)
         if reason in ("Stopped", WebSync.FINISHED, WebSync.TV_STOPPED):
             self._set_presence(None)                      # leaving the page doesn't count: the TV is still playing it
@@ -512,12 +526,42 @@ class WebTab:
         dur = sync.dur or ((st["dur"] + sync.offset) if st["dur"] else 0)
         self.discord.progress(self.SOURCE, pos, dur, st["state"] == "play")
 
+    PROGRESS_EVERY = 15.0        # seconds between writes of where the TV is, for Continue Watching
+
+    def _record_progress(self, st):
+        """Remember where the TV is in what's being followed, so it can be picked up again later."""
+        store, sync = getattr(self.app, "phone_store", None), self.sync
+        if not (store and st and sync is not None and sync.active and not sync.live and self.cast_page):
+            return
+        if time.time() < sync.settle_until or st["state"] not in ("play", "pause") or st.get("app") not in ("RokuCast", ""):
+            return
+        dur = sync.dur or ((st["dur"] + sync.offset) if st["dur"] else 0)
+        if dur < MIN_SECONDS or time.time() - self._progress_at < self.PROGRESS_EVERY:
+            return
+        self._progress_at = time.time()
+        self._save_progress(self.cast_page, st["pos"] + sync.offset, dur, sync.title)
+
+    def _save_progress(self, page, pos, dur, title, finished=False):
+        """Write one Continue Watching row, off the calling thread (the disk may be busy)."""
+        store = getattr(self.app, "phone_store", None)
+        if not store:
+            return
+        site, image, nxt = self.cast_site, self.cast_image, self.cast_next
+
+        def run():
+            try:
+                store.save_progress(page, pos, dur, title, site, image, nxt, finished)
+            except Exception as e:
+                self.ui.log(f"continue watching: {e!r}")
+        threading.Thread(target=run, name="continue-save", daemon=True).start()
+
     def tv_state(self, st):
         """Fed by the app's once-a-second look at the TV (None if it can't be reached). WebSync notices the TV leaving
         while the page is being followed; this covers the rest: you left the page, or a recast failed, and the TV has
         since gone somewhere else. Then the Discord status comes down and the encoder stops, rather than both carrying
         on for a cast nobody is watching."""
         self._feed_clock(st)
+        self._record_progress(st)
         left_over = bool(self.upscaled or (self.discord and self.discord.showing == self.SOURCE))
         following = self.sync is not None and self.sync.active
         if st is None or following or self.busy or not left_over:
@@ -531,6 +575,41 @@ class WebTab:
         self._set_presence(None)
         if self.relay:
             threading.Thread(target=self.relay.stop_upscaling, daemon=True).start()
+
+    def show_continue(self, event=None):
+        """The Continue menu: resume a show where the TV stopped, or play the episode after one that finished."""
+        store = getattr(self.app, "phone_store", None)
+        ui = self.ui
+        menu = tk.Menu(self.app, tearoff=0, bg=ui.CARD, fg=ui.FG, activebackground=ui.ACCENT, activeforeground="#ffffff",
+                       bd=0, disabledforeground=ui.MUTED)
+        rows = store.continue_list() if store else []
+        here = store.progress_for(self.guard.snapshot()["url"]) if store else None
+
+        def play(url, at=None):
+            try:
+                self._note(self.cast_link(url, at), ui.AMBER, 10)
+            except ValueError as e:
+                self._note(str(e), ui.AMBER, 10)
+        name = lambda r: (r["title"] or urlparse(r["url"]).hostname or r["url"])[:60]
+        if here and not here["finished"] and here["pos"] > 10:
+            menu.add_command(label=f"Resume this page at {self._clock(here['pos'])}",
+                             command=lambda r=here: play(r["url"], r["pos"]))
+            menu.add_separator()
+        for r in rows:
+            if r["finished"]:
+                menu.add_command(label=f"Up next after {name(r)}", command=lambda r=r: play(r["next_url"]))
+            else:
+                menu.add_command(label=f"{name(r)}  ·  {self._clock(max(0, r['dur'] - r['pos']))} left",
+                                 command=lambda r=r: play(r["url"], r["pos"]))
+        if not rows and not here:
+            menu.add_command(label="Nothing to continue yet", state="disabled")
+        else:
+            menu.add_separator()
+            menu.add_command(label="Clear list", command=store.clear_watching)
+        try:
+            menu.tk_popup(self.continue_lbl.winfo_rootx(), self.continue_lbl.winfo_rooty() + self.continue_lbl.winfo_height())
+        finally:
+            menu.grab_release()
 
     def go_home(self):
         self.guard.navigate(self.home)
@@ -593,22 +672,32 @@ class WebTab:
 
     link = None                                           # (url, started, navigated, stream_seen_at) while one is being set up
 
-    def cast_link(self, url):
-        """From any thread: open `url` in this tab's browser and cast it once a video stream shows up. Returns the
-        message to show on the phone, or raises ValueError with the reason it can't be done."""
+    RESUME_SETTLE = 2.5                                   # seconds for the page's player to move before casting from there
+
+    def cast_link(self, url, at=None):
+        """From any thread: open `url` in this tab's browser and cast it once a video stream shows up, starting `at`
+        seconds in if given. Returns the message to show on the phone, or raises ValueError with the reason it can't be
+        done."""
         url = normalize_address(url, self.home)           # plain words become a search, never a script: always http(s)
         refusal = drm.refusal_for(url)
         if refusal:
             raise ValueError(refusal.splitlines()[0])
         if self.busy:
             raise ValueError("A cast is already starting on the PC. Wait a moment, or stop it first.")
-        self._post(lambda: self._link_begin(url))
-        return "Opening it on the PC, then it goes to the TV"
+        self._post(lambda: self._link_begin(url, at))
+        return "Opening it on the PC, then it goes to the TV" if not at else \
+            f"Opening it on the PC, then it resumes at {self._clock(at)} on the TV"
 
-    def _link_begin(self, url):
+    @staticmethod
+    def _clock(seconds):
+        s = int(max(0, seconds))
+        return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+    def _link_begin(self, url, at=None):
         if self.busy:
             return
         self.next.disarm()
+        self.link_at = at
         self.link = (url, time.time(), False, 0.0)
         self._note("From your phone: opening the page…", self.ui.AMBER, 60)
         if not self.alive():
@@ -638,6 +727,11 @@ class WebTab:
                 self._note("From your phone: found the video, starting the cast…", self.ui.AMBER, 60)
             if (seen and now - seen >= self.LINK_SETTLE) or now - t0 > self.LINK_STREAM_WAIT:
                 self.link = None                          # no stream by now: cast() still tries yt-dlp, or says what's missing
+                at, self.link_at = self.link_at, None
+                if at:                                    # move the page's player first: the cast starts where it is
+                    self.guard.seek_page(at, 0)
+                    self._note(f"Resuming at {self._clock(at)}…", self.ui.AMBER, 30)
+                    return self.app.after(int(self.RESUME_SETTLE * 1000), self.cast)
                 return self.cast()
         self.app.after(500, self._link_step)
 
@@ -710,12 +804,35 @@ class WebTab:
         else:
             raise ValueError("unknown action")
 
+    YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
+
+    def phone_youtube(self, on, go=""):
+        """The phone's YouTube tab: the real youtube.com in this browser, drawn black, where tapping a video plays it on
+        the TV (through Playlet) instead of here. The phone renews `on` every few seconds; `go` opens a page too."""
+        if go and (urlparse(go).scheme != "https" or (urlparse(go).hostname or "") not in self.YOUTUBE_HOSTS):
+            raise ValueError("That isn't a YouTube address.")
+        self.phone_open()
+        self.guard.youtube_mode(on, go or None)
+
+    def _youtube_tapped(self, url):
+        """A video was tapped on YouTube in the phone's tab (called from the browser thread): play it on the TV."""
+        def run():
+            try:
+                msg = self.app.phone.backend.cast(url)
+                self._post(lambda: self._note(msg, self.ui.GREEN, 6))
+            except Exception as e:
+                self.ui.log(f"youtube tap: {e!r}")
+                text = str(e) or "The TV didn't answer."
+                self._post(lambda: self._note(text, self.ui.AMBER, 8))
+        threading.Thread(target=run, name="youtube-tap", daemon=True).start()
+
     def phone_info(self):
         snap = self.guard.snapshot()
         note = self.phone_note()
         store = getattr(self.app, "phone_store", None)
         return {"alive": self.alive(), "ready": bool(snap["running"]), "url": snap["url"], "title": snap["title"],
                 "bookmarked": bool(store and store.is_bookmarked(snap["url"])),
+                "editing": bool(snap.get("editing")),
                 "streams": snap["streams"], "busy": self.busy or self.link is not None,
                 "following": bool(self.sync and self.sync.active), "watching": self.phone_watching(),
                 "note": {"text": note[0], "ok": note[1]} if note else None}
@@ -754,9 +871,32 @@ class WebTab:
         store = getattr(self.app, "phone_store", None)
         snap = self.guard.snapshot()
         if not store:
-            return {"bookmarks": [], "history": [], "current": {"url": snap["url"], "title": snap["title"], "bookmarked": False}}
-        return {"bookmarks": store.all_bookmarks(), "history": store.recent(),
+            return {"bookmarks": [], "history": [], "continue": [], "current": {"url": snap["url"], "title": snap["title"], "bookmarked": False}}
+        return {"bookmarks": store.all_bookmarks(), "history": store.recent(), "continue": store.continue_list(),
                 "current": {"url": snap["url"], "title": snap["title"], "bookmarked": store.is_bookmarked(snap["url"])}}
+
+    def phone_continue(self, action, url=""):
+        """The phone's Continue list: resume / start (over) / next on a row, remove it, or clear them all. Returns the
+        message to show on the phone."""
+        store = getattr(self.app, "phone_store", None)
+        if not store:
+            raise ValueError("Continue Watching isn't available.")
+        if action == "clear":
+            store.clear_watching()
+            return "Cleared"
+        if action == "remove":
+            store.remove_watching(url)
+            return "Removed"
+        row = store.progress_for(url)
+        if not row:
+            raise ValueError("That one isn't in the list any more.")
+        if action == "next":
+            if not row["next_url"]:
+                raise ValueError("The next episode isn't known for this one.")
+            return self.cast_link(row["next_url"])
+        if action in ("resume", "start"):
+            return self.cast_link(row["url"], row["pos"] if action == "resume" and not row["finished"] else None)
+        raise ValueError("unknown action")
 
     def phone_bookmark(self, action, url=""):
         """toggle: the page being looked at. remove: a saved page by address. Returns whether the current page is saved."""
@@ -971,6 +1111,8 @@ class WebTab:
             self._tv_back()                           # the TV had already been told to play this
             raise
         label, self.cast_site, self.cast_image = self._describe(title, cand)
+        self.cast_next = self._find_next()
+        self._progress_at = 0.0
         # From here the page's video is a muted remote for the TV: pause, play and scrubbing follow.
         if self.sync is None:
             self.sync = WebSync(self.guard, self.tv, self._relay_add, self.ui.log, self._following_stopped)
@@ -979,6 +1121,15 @@ class WebTab:
                         restartable=bool(self.upscaled))
         self._post(lambda: self._cast_done(attempt, label))
         self._watch_health(attempt, sess)
+
+    def _find_next(self):
+        """The address of the episode after the one just cast, or '' if the page doesn't say. Never raises: this is a
+        convenience, and a cast must not fail because of it."""
+        try:
+            return next_url(self.cast_page, self.guard.page_links(2.0)) or ""
+        except Exception as e:
+            self.ui.log(f"next episode lookup: {e!r}")
+            return ""
 
     def _describe(self, title, cand):
         """(name, site, thumbnail) for what's now on the TV. The page's live title is used if it is still the page that

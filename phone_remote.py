@@ -244,6 +244,8 @@ class PhoneRemote:
                 return 200, b.state(), "application/json"
             if path == "/api/apps":
                 return 200, {"apps": b.apps()}, "application/json"
+            if path == "/api/playlet":
+                return 200, b.playlet(), "application/json"
             if path.startswith("/api/icon/"):
                 png = b.icon(urllib.parse.unquote(path[len("/api/icon/"):]))
                 return 200, png, "image/png"
@@ -317,6 +319,16 @@ class PhoneRemote:
                 if not text:
                     raise ValueError("nothing to type")
                 b.web_text(text)
+            elif kind == "edit":
+                # live typing: delete `back` characters, then type `text`, in one round trip
+                back = int(_coord(body, "back", 500))
+                text = str(body.get("text", ""))[:500]
+                if back < 0 or not (back or text):
+                    raise ValueError("nothing to type")
+                for _ in range(back):
+                    b.web_key("Backspace")
+                if text:
+                    b.web_text(text)
             elif kind == "key":
                 key = str(body.get("name", ""))
                 if key not in WEB_KEYS:
@@ -345,6 +357,14 @@ class PhoneRemote:
             b.web_transport(action, value)
         elif name == "cast":
             return 200, {"message": b.web_cast()}, js
+        elif name == "continue":
+            action = str(body.get("action", ""))
+            if action not in ("resume", "start", "next", "remove", "clear"):
+                raise ValueError("unknown action")
+            return 200, {"message": b.web_continue(action, str(body.get("url", ""))[:2000])}, js
+        elif name == "youtube":
+            go = str(body.get("go") or "")[:300]
+            b.web_youtube(bool(body.get("on")), go)
         else:
             return 404, {"error": "not found"}, js
         return 200, {"ok": True}, js
@@ -515,8 +535,9 @@ body.browsing header{display:none}
   font-size:14px;line-height:1.5;pointer-events:none}
 #bstat{position:absolute;left:8px;right:8px;top:8px;padding:6px 10px;border-radius:10px;background:rgba(15,15,18,.82);font-size:12px;
   color:var(--green);pointer-events:none;display:none}
-#kb{position:absolute;left:0;right:0;bottom:0;display:none;gap:6px;padding:8px;background:rgba(15,15,18,.95);border-top:1px solid var(--edge)}
+#kb{position:absolute;left:0;right:0;top:0;z-index:5;display:none;gap:6px;padding:8px;background:rgba(15,15,18,.96);border-bottom:1px solid var(--edge)}
 #kb.on{display:flex}
+body.kbon #bstat{top:64px}
 #kb input{min-height:44px;padding:8px 12px;font-size:16px;flex:1;min-width:0;width:auto}
 #kb button{flex:0 0 auto;min-width:48px;min-height:44px;padding:0 10px;font-size:14px}
 #watch{display:none;align-items:center;gap:8px;margin:10px 0 0;padding:8px 10px;border:1px solid var(--edge);border-radius:12px;background:var(--card);font-size:13px}
@@ -546,9 +567,31 @@ body.browsing header{display:none}
 .pg .l span{display:block;font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pg button{flex:0 0 40px;min-height:40px;font-size:16px;color:var(--muted);background:none;border:0}
 .empty{color:var(--muted);text-align:center;padding:30px 10px;font-size:14px}
+.pg.cw{flex-wrap:wrap;padding:8px 0}
+.pg.cw .l{flex:1 0 100%;padding:2px 4px}
+.pg.cw .acts{display:flex;gap:8px;flex:1 0 100%;padding:0 4px}
+.pg.cw .acts button{flex:1;min-height:38px;font-size:14px;color:var(--fg);background:var(--card);border:1px solid var(--edge);border-radius:10px}
+.pg.cw .acts button.go{background:var(--accent);border-color:var(--accent);font-weight:600}
+.pg.cw .acts button.x{flex:0 0 44px;color:var(--muted)}
 #bact #kbd,#bact #star,#bact #pages{flex:0 0 52px;font-size:19px}
 #bact{display:flex;gap:8px;padding:8px}
+#ytlabel,#plbtn{display:none}
+body.ytmode #goform,body.ytmode [data-nav=home],body.ytmode #star,body.ytmode #pages,body.ytmode #bcast,body.ytmode #btrans{display:none}
+body.ytmode #ytlabel{display:block;flex:1;font-weight:600;padding-left:4px}
+body.ytmode #plbtn{display:block}
+body.ytmode #view{background:#000}
+body.ytmode #bstat{display:none!important}
 #bact button{min-height:46px}
+#t-playlet.on{display:flex;flex-direction:column;height:calc(100vh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top));
+  height:calc(100dvh - 62px - env(safe-area-inset-bottom) - env(safe-area-inset-top))}
+#plbar{display:flex;gap:8px;align-items:center;padding:8px 10px;font-size:14px;color:var(--muted)}
+#plbar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#plbar button{flex:0 0 44px;min-height:40px;font-size:20px;border-radius:12px;padding:0}
+#plview{position:relative;flex:1;min-height:0;background:#000}
+#plframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none;background:#0f0f0f}
+#plmsg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;
+  padding:30px;color:var(--muted);font-size:14px;line-height:1.5}
+#plmsg button{flex:0 0 auto;min-width:200px;padding:0 20px}
 </style></head><body>
 <div id="gone"><h2 style="color:var(--fg)">Open this from CapoCast</h2>
 On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with your phone's camera. This page needs the link it shows.</div>
@@ -582,12 +625,19 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
     <button data-nav="back" aria-label="Back">‹</button><button data-nav="forward" aria-label="Forward">›</button>
     <form id="goform" action="javascript:void(0)"><input id="addr" type="text" inputmode="url" enterkeyhint="go" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Search or enter address"></form>
     <button data-nav="reload" aria-label="Reload">⟳</button><button data-nav="home" aria-label="Home page">⌂</button>
+    <span id="ytlabel">YouTube</span><button id="plbtn" aria-label="Playlet settings">⚙</button>
   </div>
   <div id="view"><img id="shot" alt="" draggable="false"><div id="vmsg">Opening the browser on your PC…</div><div id="bstat"></div>
-    <div id="kb"><input id="kbtext" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send" placeholder="Type into the page">
-      <button id="kbsend" class="go">Send</button><button id="kbenter">⏎</button><button id="kbdel">⌫</button></div></div>
+    <div id="kb"><input id="kbtext" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" placeholder="Type here — it goes to the page as you type">
+      <button id="kbdel" aria-label="Delete">⌫</button><button id="kbenter" class="go" aria-label="Enter">⏎</button><button id="kbclose" aria-label="Hide keyboard">✕</button></div></div>
   <div id="btrans"><button data-skip="-10">⟲ 10s</button><button id="bpp">⏯</button><button data-skip="10">10s ⟳</button></div>
   <div id="bact"><button id="kbd" aria-label="Keyboard">⌨</button><button id="star" aria-label="Bookmark this page">☆</button><button id="pages" aria-label="Bookmarks and history">☰</button><button id="bcast" class="go">Cast this page</button></div>
+</section>
+
+<section class="tab" id="t-playlet">
+  <div id="plbar"><button id="plback" aria-label="Back to YouTube">‹</button><span id="plwho">Playlet settings</span><button id="plhome" aria-label="Back to Playlet's home">⌂</button></div>
+  <div id="plview"><iframe id="plframe" title="Playlet" allow="clipboard-write"></iframe>
+    <div id="plmsg"><div id="plmsgtext">Looking for Playlet on the TV…</div><button class="go" id="plopen" style="display:none">Open Playlet on the TV</button></div></div>
 </section>
 
 <section class="tab" id="t-cast">
@@ -604,9 +654,9 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
   <div class="apps" id="apps"></div>
 </section>
 </div>
-<div id="sheet"><div class="sh"><div class="shh"><button data-pg="bookmarks" class="on">Bookmarks</button><button data-pg="history">History</button><button id="shclose" aria-label="Close">✕</button></div>
+<div id="sheet"><div class="sh"><div class="shh"><button data-pg="continue">Continue</button><button data-pg="bookmarks" class="on">Bookmarks</button><button data-pg="history">History</button><button id="shclose" aria-label="Close">✕</button></div>
   <div id="shlist"></div><button class="small" id="shclear" style="display:none;margin-top:8px;flex:0 0 auto">Clear history</button></div></div>
-<nav id="nav"><button data-tab="remote" class="on"><b>◉</b>Remote</button><button data-tab="browse"><b>◍</b>Browse</button><button data-tab="cast"><b>⇪</b>Cast</button><button data-tab="apps"><b>▦</b>Apps</button></nav>
+<nav id="nav"><button data-tab="remote" class="on"><b>◉</b>Remote</button><button data-tab="browse"><b>◍</b>Browse</button><button data-tab="yt"><b>▶</b>YouTube</button><button data-tab="cast"><b>⇪</b>Cast</button><button data-tab="apps"><b>▦</b>Apps</button></nav>
 <script>
 "use strict";
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -710,13 +760,78 @@ $("#cast").onclick=async()=>{
 };
 $("#stopcast").onclick=async()=>{ const d=await act("/api/stop",{}); if(d) note("Stopped",true); };
 
-$$("#nav button").forEach(b=>b.onclick=()=>{
-  $$("#nav button").forEach(x=>x.classList.toggle("on",x===b));
-  $$(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+b.dataset.tab));
-  document.body.classList.toggle("browsing",b.dataset.tab==="browse");
-  if(b.dataset.tab==="apps") loadApps();
-  browse(b.dataset.tab==="browse");
-});
+// The YouTube tab is the real youtube.com, in the PC's browser (the Browse tab's picture), drawn black. Tapping a video
+// there plays it on the TV through Playlet instead of in the browser. Playlet's own settings page is one tap away (⚙).
+let ytSub=false, curTab="remote";
+function showTab(tab){
+  curTab=tab;
+  const yt=tab==="yt", sec=yt?(ytSub?"playlet":"browse"):tab;
+  $$("#nav button").forEach(x=>x.classList.toggle("on",x.dataset.tab===tab));
+  $$(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+sec));
+  document.body.classList.toggle("browsing",sec==="browse"||sec==="playlet");
+  document.body.classList.toggle("ytmode",yt&&!ytSub);
+  if(tab==="apps") loadApps();
+  if(sec!=="browse") kbShow(false);
+  browse(sec==="browse");
+  ytSession(yt&&!ytSub);
+  plShow(yt&&ytSub);
+}
+$$("#nav button").forEach(b=>b.onclick=()=>{ if(b.dataset.tab==="yt") ytSub=false; showTab(b.dataset.tab); });
+$("#plbtn").onclick=()=>{ ytSub=true; showTab("yt"); };
+$("#plback").onclick=()=>{ ytSub=false; showTab("yt"); };
+
+// While this tab is open the phone renews a switch on the PC (every few seconds; it lapses by itself if the phone goes away):
+// YouTube is drawn black and a tapped video goes to the TV. The first time, it also opens YouTube if the browser is elsewhere.
+let ytBeat=0, ytWasOn=false, ytGo=false;
+const ytHost=u=>/(^|\.)youtube\.com$|^accounts\.google\./.test(host(u||""));
+async function ytTick(){
+  try{
+    let go="";
+    if(ytGo){
+      const i=await api("/api/web/info");
+      if(i.ready){ if(!ytHost(i.url)) go="https://www.youtube.com/"; ytGo=false; }
+    }
+    await api("/api/web/youtube",{on:true,go});
+  }catch(e){}
+}
+function ytSession(on){
+  clearInterval(ytBeat); ytBeat=0;
+  if(on){ ytWasOn=true; ytGo=true; ytTick(); ytBeat=setInterval(ytTick,5000); }
+  else if(ytWasOn){ ytWasOn=false; api("/api/web/youtube",{on:false}).catch(()=>{}); }
+}
+
+// ---- Playlet's own web app (its settings, and the feed of the account signed in on the Roku). The Roku serves it, on its own,
+// while Playlet is open on the TV, so this only has to find it, open Playlet if it isn't, and show it.
+const plf=$("#plframe");
+let plOn=false, plRun=0, plLoaded=false, plDown=false, plBase="";
+function plMsg(text,button){ $("#plmsg").style.display=text?"flex":"none"; $("#plmsgtext").textContent=text||""; $("#plopen").style.display=button?"block":"none"; }
+function plShow(on){ plOn=on; plRun++; if(on) plLoop(plRun); }
+async function plLoop(id){
+  while(plOn&&id===plRun){
+    let p;
+    try{ p=await api("/api/playlet"); }
+    catch(e){ plMsg(e.message,false); await sleep(2500); continue; }
+    if(!plOn||id!==plRun) return;
+    if(p.up){
+      plBase=p.url;
+      $("#plwho").textContent="Playlet"+(p.account?" · signed in as "+p.account:"");
+      if(!plLoaded||plDown){ plf.src=plBase; plLoaded=true; plDown=false; }
+      plf.style.display="block"; plMsg("");
+      return;                                        // it stays open while you use it; coming back here checks again
+    }
+    if(plLoaded) plDown=true;                        // Playlet was closed on the TV: reload it once it is back
+    plf.style.display="none";
+    plMsg("Playlet isn't open on the TV. It has to be open for its settings to show here.",true);
+    $("#plopen").dataset.id=p.id||"";
+    await sleep(2000);
+  }
+}
+$("#plopen").onclick=async()=>{
+  const id=$("#plopen").dataset.id; if(!id) return;
+  plMsg("Opening Playlet on the TV…",false);
+  await act("/api/launch",{id});
+};
+$("#plhome").onclick=()=>{ if(plBase&&plLoaded) plf.src=plBase; else plShow(true); };
 
 // ---- Browse: the PC's browser as a live picture. Taps, drags and typing go back to it.
 const view=$("#view"), shot=$("#shot");
@@ -756,6 +871,7 @@ async function infoLoop(id){
       st.style.color=i.note&&!i.note.ok?"var(--amber)":"var(--green)";
       $("#bcast").textContent=i.busy?"Cancel":i.following?"Recast this page":"Cast this page";
       if(bookmarked!==!!i.bookmarked){ bookmarked=!!i.bookmarked; paintStar(); }
+      kbFollow(!!i.editing);
     }catch(e){}
     await sleep(1000);
   }
@@ -772,15 +888,33 @@ let bookmarked=false;
 $("#star").onclick=async()=>{ const d=await act("/api/web/bookmark",{action:"toggle"}); if(d){ bookmarked=d.bookmarked; paintStar(); note(bookmarked?"Bookmarked":"Bookmark removed",true); } };
 function paintStar(){ $("#star").textContent=bookmarked?"★":"☆"; $("#star").style.color=bookmarked?"var(--amber)":""; }
 let sheetPage="bookmarks", pagesData=null;
-async function openSheet(){ $("#sheet").classList.add("on"); pagesData=await act("/api/web/pages"); renderSheet(); }
+async function openSheet(){ $("#sheet").classList.add("on"); pagesData=await act("/api/web/pages"); if(pagesData&&pagesData.continue&&pagesData.continue.length) sheetPage="continue"; renderSheet(); }
+function clock(s){ s=Math.max(0,Math.floor(s)); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return (h?h+":"+String(m).padStart(2,"0"):m)+":"+String(x).padStart(2,"0"); }
+async function cwAct(action,url){ const d=await act("/api/web/continue",{action,url}); if(d&&d.message) note(d.message,true); if(action==="remove"||action==="clear"){ pagesData=await act("/api/web/pages"); renderSheet(); } else closeSheet(); }
+function renderContinue(list,rows){
+  rows.forEach(r=>{
+    const row=document.createElement("div"); row.className="pg cw";
+    const done=r.finished, left=Math.max(0,r.dur-r.pos);
+    row.innerHTML='<div class="l"><b></b><span></span></div><div class="acts"></div>';
+    row.querySelector("b").textContent=r.title||host(r.url);
+    row.querySelector("span").textContent=(done?"Finished":clock(left)+" left")+" · "+(r.site||host(r.url));
+    const acts=row.querySelector(".acts");
+    const add=(label,cls,fn)=>{ const b=document.createElement("button"); b.textContent=label; if(cls) b.className=cls; b.onclick=fn; acts.appendChild(b); };
+    if(done){ add("Play next","go",()=>cwAct("next",r.url)); add("Watch again","",()=>cwAct("start",r.url)); }
+    else { add("Resume "+clock(r.pos),"go",()=>cwAct("resume",r.url)); add("Start over","",()=>cwAct("start",r.url)); }
+    add("✕","x",()=>cwAct("remove",r.url));
+    list.appendChild(row);
+  });
+}
 function closeSheet(){ $("#sheet").classList.remove("on"); }
 function host(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch(e){ return u; } }
 function renderSheet(){
   $$("#sheet [data-pg]").forEach(b=>b.classList.toggle("on",b.dataset.pg===sheetPage));
   $("#shclear").style.display=sheetPage==="history"&&pagesData&&pagesData.history.length?"block":"none";
   const list=$("#shlist"); list.innerHTML="";
-  const rows=pagesData?pagesData[sheetPage]:[];
-  if(!rows.length){ list.innerHTML='<div class="empty">'+(sheetPage==="bookmarks"?"No bookmarks yet. Tap ☆ on a page to save it.":"Nothing here yet.")+'</div>'; return; }
+  const rows=pagesData?(pagesData[sheetPage]||[]):[];
+  if(!rows.length){ list.innerHTML='<div class="empty">'+(sheetPage==="bookmarks"?"No bookmarks yet. Tap ☆ on a page to save it.":sheetPage==="continue"?"Nothing to continue yet. Shows you cast from the Browse tab appear here, where you stopped.":"Nothing here yet.")+'</div>'; return; }
+  if(sheetPage==="continue") return renderContinue(list,rows);
   rows.forEach(r=>{
     const row=document.createElement("div"); row.className="pg";
     row.innerHTML='<div class="l"><b></b><span></span></div>'+(sheetPage==="bookmarks"?'<button aria-label="Remove">✕</button>':'');
@@ -797,15 +931,45 @@ $$("#sheet [data-pg]").forEach(b=>b.onclick=()=>{ sheetPage=b.dataset.pg; render
 $("#shclear").onclick=async()=>{ await act("/api/web/bookmark",{action:"clear_history"}); pagesData=await act("/api/web/pages"); renderSheet(); };
 $("#setuplink").onclick=e=>{ e.preventDefault(); location.href="/setup?k="+encodeURIComponent(TOKEN); };
 $("#bcast").onclick=async()=>{ const d=await act("/api/web/cast",{}); if(d) note(d.message,true); };
-$("#kbd").onclick=()=>{ const k=$("#kb"); k.classList.toggle("on"); if(k.classList.contains("on")) $("#kbtext").focus(); else $("#kbtext").blur(); };
-async function kbSend(){ const i=$("#kbtext"); if(!i.value) return true; const d=await act("/api/web/input",{type:"text",text:i.value}); if(d){ i.value=""; return true; } return false; }
-$("#kbsend").onclick=kbSend;
-$("#kbenter").onclick=async()=>{ if(await kbSend()) act("/api/web/input",{type:"key",name:"Enter"}); };
-$("#kbtext").addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); $("#kbenter").click(); } });
-(()=>{ const b=$("#kbdel"); let t1=0,t2=0; const fire=()=>act("/api/web/input",{type:"key",name:"Backspace"});
+// Typing: the bar's text goes to the page live, as you type (no Send button). Each change is turned into "delete n, type s",
+// and the changes are sent one at a time, in order, so fast typing can't arrive scrambled.
+const kbIn=$("#kbtext");
+let kbPrev="", kbQ=Promise.resolve();
+const kbOn=()=>$("#kb").classList.contains("on");
+function kbShow(on,focus){
+  $("#kb").classList.toggle("on",on); document.body.classList.toggle("kbon",on);
+  kbIn.value=""; kbPrev="";
+  if(on&&focus) kbIn.focus(); else if(!on) kbIn.blur();
+}
+function kbSend(body){ kbQ=kbQ.then(()=>act("/api/web/input",body)); return kbQ; }
+function kbSync(){
+  const now=Array.from(kbIn.value), was=Array.from(kbPrev); let i=0;
+  while(i<now.length&&i<was.length&&now[i]===was[i]) i++;
+  const back=was.length-i, add=now.slice(i).join(""); kbPrev=kbIn.value;
+  if(back||add) kbSend({type:"edit",back,text:add});
+}
+kbIn.addEventListener("input",kbSync);
+function kbEnter(){ kbIn.value=""; kbPrev=""; kbSend({type:"key",name:"Enter"}); }
+kbIn.addEventListener("keydown",e=>{ if(e.key==="Enter"){ e.preventDefault(); kbEnter(); } });
+$("#kbd").onclick=()=>{ if(kbOn()) kbShow(false); else kbShow(true,true); };
+$("#kbclose").onclick=()=>kbShow(false);
+// pressing a bar button must not take the focus (and so the phone's keyboard) away from the text box
+// (mousedown only: cancelling touchstart would stop the tap from ever becoming a click on iOS)
+$$("#kb button").forEach(b=>b.addEventListener("mousedown",e=>e.preventDefault()));
+$("#kbenter").onclick=kbEnter;
+(()=>{ const b=$("#kbdel"); let t1=0,t2=0;
+  const fire=()=>{ if(kbIn.value){ kbIn.value=Array.from(kbIn.value).slice(0,-1).join(""); kbSync(); } else kbSend({type:"key",name:"Backspace"}); };
   const stop=()=>{clearTimeout(t1);clearInterval(t2);};
-  b.addEventListener("pointerdown",e=>{ e.preventDefault(); fire(); t1=setTimeout(()=>{t2=setInterval(fire,110);},380); });
+  b.addEventListener("pointerdown",()=>{ fire(); t1=setTimeout(()=>{t2=setInterval(fire,90);},380); });
   ["pointerup","pointerleave","pointercancel"].forEach(ev=>b.addEventListener(ev,stop)); })();
+// The bar comes up by itself when the page puts the cursor in a text box (tap the bar once and the keyboard follows),
+// and goes away when the page stops asking for text.
+let kbEditing=false, kbGone=0;
+function kbFollow(editing){
+  if(editing){ kbGone=0; if(!kbEditing&&!kbOn()) kbShow(true,false); }
+  else if(kbEditing&&kbOn()&&++kbGone>=2) kbShow(false);
+  if(editing||kbGone>=2||!kbOn()) kbEditing=editing;
+}
 
 // touch: a tap clicks, a drag scrolls (and keeps coasting when you let go)
 let touch=null, acc={dx:0,dy:0,x:0,y:0}, busy=false, fling=0;
@@ -816,12 +980,16 @@ async function flush(){
   busy=false; if(acc.dx||acc.dy) flush();
 }
 function scrollBy(dx,dy,x,y){ acc.dx+=dx; acc.dy+=dy; acc.x=x; acc.y=y; flush(); }
+// The typing bar sits on top of the picture: touches on it are the phone's own (focus, taps), never the page's.
+const inKb=e=>!!(e.target&&e.target.closest&&e.target.closest("#kb"));
 view.addEventListener("touchstart",e=>{
+  if(inKb(e)){ touch=null; return; }
   e.preventDefault(); clearInterval(fling);
   if(e.touches.length!==1){ touch=null; return; }
   const p=at(e.touches[0]); touch={x0:p.x,y0:p.y,lx:p.x,ly:p.y,moved:false,hist:[]};
 },{passive:false});
 view.addEventListener("touchmove",e=>{
+  if(inKb(e)) return;
   e.preventDefault(); if(!touch||e.touches.length!==1) return;
   const p=at(e.touches[0]);
   if(!touch.moved&&Math.hypot(p.x-touch.x0,p.y-touch.y0)<10*Math.max(sx,sy)) return;
@@ -830,6 +998,7 @@ view.addEventListener("touchmove",e=>{
   scrollBy(dx,dy,p.x,p.y);
 },{passive:false});
 view.addEventListener("touchend",e=>{
+  if(inKb(e)) return;
   e.preventDefault(); const t=touch; touch=null; if(!t) return;
   if(!t.moved){ act("/api/web/input",{type:"tap",x:t.x0,y:t.y0}); return; }
   const now=performance.now(), recent=t.hist.filter(h=>now-h[0]<90); if(!recent.length) return;

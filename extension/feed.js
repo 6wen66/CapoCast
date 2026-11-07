@@ -14,6 +14,13 @@
 
   let autocast = false, lastReply = 0, castId = null, mutedByUs = null, seekTimer = null;
   let ignoreSeeksUntil = 0;   // set while the app nudges this player onto the TV's timeline
+  // How long the app may stay silent before this page decides it was closed and hands YouTube back. It used to be
+  // 3 s: a busy PC (a big extraction, a game) can stall the browser or the app for longer than that, and every false
+  // "closed" unmuted this player (a second, late sound next to the TV) and re-cast the video from scratch when the
+  // app answered again, which rebuffered the TV.
+  const APP_SILENT_MS = 15000;
+  let polling = 0;            // when the poll in flight was sent (0 = none), so a stall doesn't pile up requests
+  let lastTick = Date.now(), worstGap = 0, lastRtt = 0;   // what the app is told so it can say who stalled
 
   function videoId(href) {
     try {
@@ -112,6 +119,12 @@
 
   const timer = setInterval(() => {
     if (!runtimeAlive()) { clearInterval(timer); autocast = false; return; }   // orphaned by a reload: stand down
+    // A tick that arrives late (the browser slowed this page's timers, or was too busy) says nothing about whether the
+    // app is still there, so it must not count as silence: start the wait again from now.
+    const tickNow = Date.now(), late = tickNow - lastTick;
+    lastTick = tickNow;
+    worstGap = Math.max(worstGap, late);
+    if (late > 1500 && lastReply) lastReply = tickNow;
     // Left the video (Home, a channel, search...): the TV goes back to Playlet's home screen too.
     if (autocast && castId && !currentId()) {
       send({ kind: "leave", id: castId });
@@ -121,21 +134,30 @@
     const v = mainVideo();
     if (autocast && castId && v && !v.muted) mute(v);   // the sound is on the TV; keep this copy silent
     const state = castId && v ? { id: castId, t: v.currentTime.toFixed(2), paused: v.paused ? 1 : 0 } : {};
-    try {
-      chrome.runtime.sendMessage({ type: "poll", state }, (cmd) => {
-        if (chrome.runtime.lastError || !cmd || !cmd.settings) return;   // app not running
-        lastReply = Date.now();
-        setAutocast(!!cmd.settings.autocast);
-        if (cmd.navigate) location.href = cmd.navigate;
-        if (cmd.history) history.go(cmd.history);
-        if (cmd.reload) location.reload();
-        // The TV is the real screen: snap this (muted) player to its timeline without echoing a seek back.
-        if (cmd.sync != null && cmd.syncId === castId && v) {
-          ignoreSeeksUntil = Date.now() + 1500;
-          v.currentTime = cmd.sync;
-        }
-      });
-    } catch { /* extension reloaded */ }
-    if (Date.now() - lastReply > 3000) setAutocast(false);   // app closed: hand YouTube back to normal
+    state.gap = (worstGap / 1000).toFixed(2);           // the page's slowest timer gap and last round trip since the last poll
+    state.rtt = (lastRtt / 1000).toFixed(2);
+    worstGap = 0;
+    if (!polling || Date.now() - polling >= 4000) {   // else the last poll hasn't come back yet: don't queue another
+      polling = Date.now();
+      try {
+        const sentAt = Date.now();
+        chrome.runtime.sendMessage({ type: "poll", state }, (cmd) => {
+          polling = 0;
+          lastRtt = Date.now() - sentAt;
+          if (chrome.runtime.lastError || !cmd || !cmd.settings) return;   // app not running
+          lastReply = Date.now();
+          setAutocast(!!cmd.settings.autocast);
+          if (cmd.navigate) location.href = cmd.navigate;
+          if (cmd.history) history.go(cmd.history);
+          if (cmd.reload) location.reload();
+          // The TV is the real screen: snap this (muted) player to its timeline without echoing a seek back.
+          if (cmd.sync != null && cmd.syncId === castId && v) {
+            ignoreSeeksUntil = Date.now() + 1500;
+            v.currentTime = cmd.sync;
+          }
+        });
+      } catch { /* extension reloaded */ }
+    }
+    if (Date.now() - lastReply > APP_SILENT_MS) setAutocast(false);   // app closed: hand YouTube back to normal
   }, 250);
 })();

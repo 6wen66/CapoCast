@@ -377,7 +377,81 @@ class YouTubeStatus(unittest.TestCase):
                                   clear=lambda s: calls.append(("clear", s)))
         app = SimpleNamespace(discord=discord, _yt_since=0.0, _yt_gone=0, _yt_id=None, _yt_want=None)
         app._yt_show = lambda title, vid: g.App._yt_show(app, title, vid)
+        app._yt_now = lambda title, vid: g.App._yt_now(app, title, vid)
+        app._adopt_playlet = lambda: g.App._adopt_playlet(app)
+        app._yt_adopt = lambda: g.App._yt_adopt(app)
+        app._host = "tv"
+        app.ADOPT_EVERY = g.App.ADOPT_EVERY
         return app
+
+    def adopt(self, app, st, queue):
+        """on_tv_state with every thread run on the spot and Playlet's queue faked."""
+        class Inline:
+            def __init__(self, target, args=(), daemon=None):
+                self.target, self.args = target, args
+
+            def start(self):
+                self.target(*self.args)
+        with mock.patch.object(g.threading, "Thread", Inline), \
+                mock.patch.object(g.Remote, "playlet_now", return_value=queue), \
+                mock.patch.object(g.discord_presence, "youtube_info", return_value=("Chan", "Name")):
+            g.App.on_tv_state(app, st)
+
+    PLAYING = {"state": "play", "app": "Playlet", "pos": 5, "dur": 90}
+
+    def test_a_video_started_from_the_phone_gets_a_status(self):
+        """The phone's YouTube tab (and a YouTube link sent from the phone) play in Playlet without the Chrome extension,
+        so CastSync never announced them."""
+        app = self.app()
+        app.discord.showing = None
+        self.adopt(app, self.PLAYING, {"videoid": "phone1", "title": "From the phone"})
+        kind, args, _ = app.discord.calls[0]
+        self.assertEqual((kind, args[:3]), ("show", ("youtube", "Chan", "Name")))
+        self.assertEqual(args[4], "https://i.ytimg.com/vi/phone1/hqdefault.jpg")
+
+    def test_a_different_video_started_from_the_phone_replaces_the_status(self):
+        app = self.app()
+        self.now(app, "A", "old")
+        app.discord.calls.clear()
+        self.adopt(app, self.PLAYING, {"videoid": "new", "title": "B"})
+        self.assertEqual(len(app.discord.calls), 1)
+        self.assertEqual(app._yt_id, "new")
+
+    def test_a_video_the_status_already_shows_is_not_announced_again(self):
+        app = self.app()
+        self.now(app, "A", "same")
+        app.discord.calls.clear()
+        self.adopt(app, self.PLAYING, {"videoid": "same", "title": "A"})
+        self.assertEqual(app.discord.calls, [])
+
+    def test_playlet_is_asked_only_every_few_seconds(self):
+        app = self.app()
+        app.discord.showing = None
+        with mock.patch.object(g.Remote, "playlet_now", return_value={}) as asked:
+            class Inline:
+                def __init__(self, target, args=(), daemon=None):
+                    self.target = target
+
+                def start(self):
+                    self.target()
+            with mock.patch.object(g.threading, "Thread", Inline):
+                for _ in range(5):
+                    g.App.on_tv_state(app, self.PLAYING)
+        self.assertEqual(asked.call_count, 1)
+
+    def test_nothing_is_adopted_when_the_tv_is_not_in_playlet_or_the_switch_is_off(self):
+        app = self.app()
+        app.discord.showing = None
+        self.adopt(app, {"state": "play", "app": "RokuCast", "pos": 1, "dur": 9}, {"videoid": "x"})
+        app.discord.is_on = lambda s: False
+        self.adopt(app, self.PLAYING, {"videoid": "x"})
+        self.assertEqual(app.discord.calls, [])
+
+    def test_playlet_not_answering_leaves_things_alone(self):
+        app = self.app()
+        app.discord.showing = None
+        self.adopt(app, self.PLAYING, {})
+        self.assertEqual(app.discord.calls, [])
 
     def now(self, app, title, vid):
         """_yt_now with its look-up thread run on the spot and YouTube's answer faked."""
@@ -422,8 +496,10 @@ class YouTubeStatus(unittest.TestCase):
 
     def test_playlet_still_playing_keeps_it(self):
         app = self.app()
+        self.now(app, "A", "id1")
+        app.discord.calls.clear()
         for _ in range(4):
-            g.App.on_tv_state(app, {"state": "play", "app": "Playlet", "pos": 1, "dur": 9})
+            self.adopt(app, {"state": "play", "app": "Playlet", "pos": 1, "dur": 9}, {"videoid": "id1"})
         self.assertEqual(app.discord.calls, [])
 
     def test_castsync_announces_what_it_puts_on_the_tv(self):
@@ -435,6 +511,49 @@ class YouTubeStatus(unittest.TestCase):
         self.assertEqual(seen, [("T", "v1"), (None, None)])
         sync.on_now = lambda *a: 1 / 0                           # a broken callback must not break casting
         sync._announce("T", "v1")
+
+    def _sync(self, current="v1"):
+        sync = g.CastSync.__new__(g.CastSync)
+        sync.current, sync.title, sync.q = current, "", __import__("queue").Queue()
+        sync.on_now, sync.settle_until, sync.lead, sync.last_check = None, 0.0, 2.5, 0.0
+        sync._last_seek, sync.bridge, sync.host_fn = None, SimpleNamespace(player=lambda: None), lambda: "tv"
+        return sync
+
+    def test_a_repeated_load_does_not_reload_a_video_the_tv_is_already_playing(self):
+        sync = self._sync()
+        playing = {"state": "play", "app": "Playlet", "pos": 330.0, "dur": 900}
+        with mock.patch.object(g.Remote, "state", return_value=playing),              mock.patch.object(g.Remote, "playlet_now", return_value={"videoid": "v1"}),              mock.patch.object(g.Remote, "cast") as cast:
+            sync._handle({"kind": "load", "id": "v1", "t": 325})
+        cast.assert_not_called()
+
+    def test_a_load_for_a_different_point_or_video_still_reloads(self):
+        for ev, state in (({"kind": "load", "id": "v1", "t": 10}, {"state": "play", "app": "Playlet", "pos": 330.0, "dur": 900}),
+                          ({"kind": "load", "id": "v2", "t": 330}, {"state": "play", "app": "Playlet", "pos": 330.0, "dur": 900}),
+                          ({"kind": "load", "id": "v1", "t": 330}, {"state": "play", "app": "Netflix", "pos": 330.0, "dur": 900})):
+            sync = self._sync()
+            with mock.patch.object(g.Remote, "state", return_value=state),                  mock.patch.object(g.Remote, "playlet_now", return_value={"videoid": "v1"}),                  mock.patch.object(g.Remote, "cast") as cast,                  mock.patch.object(sync, "_started", return_value=False):
+                sync._handle(ev)
+            cast.assert_called_once()
+
+    def test_a_slow_playlet_answer_is_not_sent_twice(self):
+        calls = []
+
+        def slow(*a, **k):
+            calls.append(k.get("timeout"))
+            raise TimeoutError("timed out")
+        with mock.patch.object(g.Remote, "_open", side_effect=slow),              mock.patch.object(g.Remote, "_ensure_playlet") as ensure:
+            with self.assertRaises(TimeoutError):
+                g.Remote.cast("tv", "v1", 5)
+        self.assertEqual(len(calls), 1)
+        self.assertGreaterEqual(calls[0], 8)
+        ensure.assert_not_called()
+
+    def test_the_extension_waits_out_a_stalled_pc_before_handing_youtube_back(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "extension", "feed.js"),
+                   encoding="utf-8").read()
+        ms = int(__import__("re").search(r"APP_SILENT_MS = (\d+)", src).group(1))
+        self.assertGreaterEqual(ms, 10000)
+        self.assertIn("lastReply > APP_SILENT_MS", src)
 
 
 class BrowserStandIn:

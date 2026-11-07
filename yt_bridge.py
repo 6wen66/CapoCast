@@ -33,6 +33,7 @@ class Bridge:
         self._commands = []
         self.settings = {"autocast": True}   # sent to the extension on every poll
         self.on_event = None                   # called (on a server thread) with each player event
+        self.on_poll = None                    # called (timer_gap, round_trip in seconds) with each poll, for the health panel
         self.seen = 0.0                        # last time the extension was heard from
         self.server = None
         self._rejected = 0
@@ -79,7 +80,9 @@ class Bridge:
                 if not ok:
                     return self._reply(403)
                 if self.path.startswith("/command"):
-                    bridge._note_player(parse_qs(urlparse(self.path).query))
+                    q = parse_qs(urlparse(self.path).query)
+                    bridge._note_player(q)
+                    bridge._note_poll(q)
                     return self._reply(200, bridge._pop_command(), origin)
                 self._reply(404, origin=origin)
 
@@ -124,6 +127,16 @@ class Bridge:
                             "at": time.time()}
         except (KeyError, ValueError):
             self._player = None
+
+    def _note_poll(self, q):
+        """Tell the health panel a poll arrived, with what the page measured about itself (seconds; 0 if it didn't say)."""
+        if not self.on_poll:
+            return
+        num = lambda k: max(0.0, min(3600.0, float(q.get(k, ["0"])[0])))
+        try:
+            self.on_poll(num("gap"), num("rtt"))
+        except Exception as e:                  # a broken callback must not make the extension's poll fail
+            self.log(f"poll callback failed: {e!r}")
 
     def player(self):
         """{id, t, paused} with t extrapolated to now, or None if no video is being cast."""
