@@ -160,30 +160,18 @@ class WebTab:
         self.allow = tk.Label(strip, text="", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"), cursor="hand2")
         self.allow.bind("<Button-1>", lambda e: self.guard.allow_last_block())
         # Start page: "Home" goes to it, "Set as home" makes the page you're on the one the Web tab opens with.
-        self.sethome_lbl = tk.Label(strip, text="Set as home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
-        self.sethome_lbl.pack(side="right")
-        self.sethome_lbl.bind("<Button-1>", lambda e: self.set_home())
-        self.home_lbl = tk.Label(strip, text="Home", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
-        self.home_lbl.pack(side="right", padx=(0, 12))
-        self.home_lbl.bind("<Button-1>", lambda e: self.go_home())
-        self.continue_lbl = tk.Label(strip, text="Continue", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 9), cursor="hand2")
-        self.continue_lbl.pack(side="right", padx=(0, 12))
-        self.continue_lbl.bind("<Button-1>", self.show_continue)
-        self.upscale_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
-        self.upscale_lbl.pack(side="right", padx=(0, 12))
-        self.upscale_lbl.bind("<Button-1>", lambda e: self.next_upscale())
+        # one small pill per option (the accent colour means "on"), right to left
+        chip = lambda text, cmd, tip, **kw: self._chip(strip, text, cmd, tip, **kw)
+        self.sethome_lbl = chip("Set as home", self.set_home, "Open this page every time the Web tab starts")
+        self.home_lbl = chip("Home", self.go_home, "Go to your home page")
+        self.continue_lbl = chip("Continue", self.show_continue, "Pick up a show where you left off")
+        self.upscale_lbl = chip("", self.next_upscale, "Sharpen the picture to 4K on this PC before it goes to the TV")
         self._paint_upscale()
-        self.subs_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
-        self.subs_lbl.pack(side="right", padx=(0, 12))
-        self.subs_lbl.bind("<Button-1>", lambda e: self.next_subs())
+        self.subs_lbl = chip("", self.next_subs, "Draw subtitles onto the video on this PC")
         self._paint_subs()
-        self.discord_lbl = tk.Label(strip, text="", bg=ui.BG, font=(ui.FONT, 9), cursor="hand2")
-        self.discord_lbl.pack(side="right", padx=(0, 12))
-        self.discord_lbl.bind("<Button-1>", lambda e: self.toggle_discord())
+        self.discord_lbl = chip("", self.toggle_discord, "Show what you're watching on Discord")
         self._paint_discord()
-        self.stop_lbl = tk.Label(strip, text="Stop casting", bg=ui.BG, fg=ui.ACCENT, font=(ui.FONT, 9, "bold"),
-                                 cursor="hand2")
-        self.stop_lbl.bind("<Button-1>", lambda e: self.stop_casting())
+        self.stop_lbl = ui.Chip(strip, "Stop casting", self.stop_casting, solid=True)    # shown only while casting
 
         self.host = tk.Frame(self.page, bg=ui.BG)
         self.host.pack(fill="both", expand=True)
@@ -192,6 +180,12 @@ class WebTab:
         self.msg = tk.Label(self.host, text="", bg=ui.BG, fg=ui.MUTED, font=(ui.FONT, 11), justify="center")
         self.msg.place(relx=0.5, rely=0.45, anchor="center")
         self.msg.bind("<Button-1>", lambda e: self.launch())
+
+    def _chip(self, strip, text, command, tip, **kw):
+        c = self.ui.Chip(strip, text, command, **kw)
+        c.pack(side="right", padx=(0, 8))
+        self.ui.Tooltip(c, tip)
+        return c
 
     def _message(self, text, clickable=False):
         self.msg.config(text=text, fg=self.ui.FG if clickable else self.ui.MUTED, cursor="hand2" if clickable else "")
@@ -1020,6 +1014,7 @@ class WebTab:
         ui = self.ui
         win = tk.Toplevel(self.app)
         win.title("Which one is the video?")
+        getattr(ui, "dark_titlebar", lambda w: None)(win)
         win.configure(bg=ui.BG)
         win.transient(self.app)
         win.resizable(False, False)

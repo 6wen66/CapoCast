@@ -284,6 +284,10 @@ class PhoneRemote:
             return 200, {"message": b.cast(shared_link(body.get("url")))}, "application/json"
         elif path == "/api/stop":
             b.stop_cast()
+        elif path == "/api/watchpc":
+            return 200, {"message": b.watch_on_pc()}, "application/json"
+        elif path == "/api/resync":
+            return 200, {"message": b.resync()}, "application/json"
         else:
             return 404, {"error": "not found"}, "application/json"
         return 200, {"ok": True}, "application/json"
@@ -552,6 +556,7 @@ body.kbon #bstat{top:64px}
 #npapp{font-size:12px;color:var(--muted);flex:0 0 auto}
 #npseek{width:100%;margin:10px 0 2px;accent-color:var(--accent);height:28px;touch-action:pan-y}
 #np .tm{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+#onpc,#resyncbtn{display:none;width:100%;margin-top:10px;min-height:42px}
 #sheet{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.6);display:none;align-items:flex-end}
 #sheet.on{display:flex}
 #sheet .sh{width:100%;max-width:520px;margin:0 auto;max-height:78vh;display:flex;flex-direction:column;background:var(--bg);
@@ -603,7 +608,9 @@ On your PC, open CapoCast, click <b>Phone remote</b>, and scan the code with you
 <section class="tab on" id="t-remote">
   <div id="np"><div class="r"><b id="nptitle"></b><span id="npapp"></span></div>
     <input type="range" id="npseek" min="0" max="1" step="1" value="0" aria-label="Position">
-    <div class="tm"><span id="nppos">0:00</span><span id="npdur">0:00</span></div></div>
+    <div class="tm"><span id="nppos">0:00</span><span id="npdur">0:00</span></div>
+    <button class="small" id="onpc">🖥 Also watch this on the PC</button>
+    <button class="small" id="resyncbtn">⟳ Resync the PC with the TV</button></div>
   <div class="row"><button data-seek="-10">⟲ 10s</button><button id="pp" class="go" data-key="Play">⏯</button><button data-seek="10">10s ⟳</button></div>
   <div class="pad">
     <span></span><button data-key="Up" data-rep>▲</button><span></span>
@@ -709,6 +716,8 @@ function nowPlaying(n){
   $("#nptitle").textContent=n.title||n.app; $("#npapp").textContent=n.app+(n.state==="pause"?" · paused":"");
   $("#npdur").textContent=n.dur?fmt(n.dur):"";
   seek.disabled=!n.seekable;
+  $("#onpc").style.display=n.pc?"block":"none";     // YouTube and Web casts can also be opened on the PC
+  $("#resyncbtn").style.display=n.source==="youtube"?"block":"none";   // the PC's YouTube player can drift from the TV
   if(!scrubbing&&Date.now()>seekHold){ seek.max=Math.max(1,Math.floor(n.dur||1)); seek.value=Math.min(n.pos,n.dur||n.pos); $("#nppos").textContent=fmt(n.pos); }
 }
 seek.addEventListener("input",()=>{ scrubbing=true; $("#nppos").textContent=fmt(+seek.value); });
@@ -759,6 +768,8 @@ $("#cast").onclick=async()=>{
   note("Sending…",true); const d=await act("/api/cast",{url:u}); if(d){ note(d.message||"Sent",true); $("#link").value=""; }
 };
 $("#stopcast").onclick=async()=>{ const d=await act("/api/stop",{}); if(d) note("Stopped",true); };
+$("#onpc").onclick=async()=>{ const d=await act("/api/watchpc",{}); if(d) note(d.message||"Opening on the PC",true); };
+$("#resyncbtn").onclick=async()=>{ const d=await act("/api/resync",{}); if(d) note(d.message||"Resyncing",true); };
 
 // The YouTube tab is the real youtube.com, in the PC's browser (the Browse tab's picture), drawn black. Tapping a video
 // there plays it on the TV through Playlet instead of in the browser. Playlet's own settings page is one tap away (⚙).

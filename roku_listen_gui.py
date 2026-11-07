@@ -12,6 +12,7 @@ import audioop
 import json
 import os
 import queue
+import re
 import shutil
 import socket
 import subprocess
@@ -35,6 +36,7 @@ import discord_presence
 import health
 import phone_remote
 import phone_store
+import roku_find
 import tv_apps
 import web_tab
 import yt_embed
@@ -491,6 +493,60 @@ class KeyboardWatch:
                         pass
 
 
+MIN_W, MIN_H = 1200, 700      # the top bar (tabs, nav, Auto-cast, Discord, Resync, status) needs this much width
+
+
+def restore_geometry(saved, screen, min_size=(MIN_W, MIN_H)):
+    """(w, h, x, y, zoomed) to open the window with, from what was saved last time, or None to centre it as usual.
+
+    `screen` is the whole desktop across monitors, (x, y, w, h). A window saved on a monitor that has since been
+    unplugged would open out of reach, so it is only restored if its title bar is on a screen now."""
+    try:
+        w, h, x, y = (int(saved[k]) for k in ("w", "h", "x", "y"))
+        zoomed = bool(saved.get("zoomed"))
+        sx, sy, sw, sh = screen
+    except (TypeError, KeyError, ValueError):
+        return None
+    w, h = max(min_size[0], min(w, sw)), max(min_size[1], min(h, sh))
+    if x + w < sx + 120 or x > sx + sw - 120 or y < sy - 20 or y > sy + sh - 80:
+        return None
+    return w, h, x, y, zoomed
+
+
+def virtual_screen():
+    """The whole desktop across monitors as (x, y, w, h), or None if Windows won't say."""
+    try:
+        gm = ctypes.windll.user32.GetSystemMetrics
+        w, h = gm(78), gm(79)
+        return (gm(76), gm(77), w, h) if w > 0 and h > 0 else None
+    except Exception:
+        return None
+
+
+def resync_plan(tv, tv_vid, pc, current):
+    """What the Resync button should do, from where the TV and the PC's player each are. Pure, so every case is tested.
+
+    tv: Remote.state() or None; tv_vid: the video id Playlet is playing ('' if unknown); pc: Bridge.player() or None;
+    current: the video id CastSync last put on the TV. Moving the PC player is instant and reloading the TV costs a
+    rebuffer, so the TV is the reference unless it lost the video. Returns (action, why):
+      nothing | ad | buffering | align | follow (PC opens the TV's video) | recast (TV gets the PC's video)."""
+    if not pc:
+        return "nothing", "Nothing is playing in the YouTube tab. Start a video there first."
+    if pc.get("ad"):
+        return "ad", "An ad is playing in the YouTube tab. Try again when it ends."
+    tv_on = bool(tv) and tv["app"] == "Playlet" and tv["state"] in ("play", "pause", "buffer")
+    if not tv_on:
+        return "recast", "The TV had stopped, so the PC's video was sent to it again"
+    vid = tv_vid or current
+    if vid and vid != pc["id"]:
+        if pc["id"] == current:
+            return "follow", "The TV had moved on, so the PC followed it"
+        return "recast", "The TV was on a different video, so the PC's video was sent to it"
+    if tv["state"] == "buffer":
+        return "buffering", "The TV is still buffering"
+    return "align", ""
+
+
 class CastSync:
     """Mirrors the app's YouTube player onto Playlet and keeps the two lined up.
 
@@ -521,6 +577,10 @@ class CastSync:
         self.current = None      # video id on the TV
         self.last_check = 0.0
         self._last_seek = None   # (id, t, when) of the last seek sent to the TV
+        self._nudge = None       # (id, target, when) of the last time the PC player was moved onto the TV's timeline
+        self._retry = 0          # quick re-checks left when the TV couldn't be measured (it was buffering or paused)
+        self.note, self.note_until, self.note_ok = "", 0.0, True    # the result of the last Resync, for the status text
+        self.syncing = False
         threading.Thread(target=self._run, daemon=True).start()
 
     def push(self, event):
@@ -572,10 +632,23 @@ class CastSync:
             self.settle_until = t0 + self.SETTLE
             if self._started(host, ev.get("t", 0), t0):
                 self._align(host)
+        elif kind == "resync":
+            try:
+                ok, text = self._resync(host)
+                self._say(text, ok)
+            except Exception:
+                self._say("Couldn't reach the TV to resync", False)
+                raise
+            finally:
+                self.syncing = False
         elif kind == "seek":
             t, last = ev.get("t", 0), self._last_seek
             if last and last[0] == ev["id"] and abs(t - last[1]) < 1.0 and time.time() - last[2] < 6:
                 log("sync seek skipped: YouTube's own correction of the previous seek")
+                return
+            nudge = self._nudge
+            if nudge and nudge[0] == ev["id"] and abs(t - nudge[1]) < 2.0 and time.time() - nudge[2] < self.ECHO:
+                log("sync seek skipped: the page reporting the move this app just made")
                 return
             self._last_seek = (ev["id"], t, time.time())
             paused = ev.get("paused")
@@ -596,6 +669,12 @@ class CastSync:
             Remote.close_player(host)   # Playlet closes its player and shows its home screen
             self.title, self.current = "", None
             self._announce(None, None)
+
+    def adopt(self, video_id, title=""):
+        """The TV is already playing `video_id` (it was started from the phone, not by this player). Learn that, so when
+        the PC opens the same video the repeated "load" is recognised and doesn't reload it on the TV."""
+        if video_id and video_id != self.current:
+            self.current, self.title = video_id, title or video_id
 
     def _announce(self, title, video_id):
         if self.on_now:
@@ -656,12 +735,123 @@ class CastSync:
             return
         tv = self._tv_position(host)
         p = self.bridge.player()          # re-read: _tv_position took a moment
+        if tv is None and self._retry < 5:
+            # The TV wasn't playing (buffering, still starting): look again in 2 s, not after the usual 20 s
+            self._retry += 1
+            self.last_check = time.time() - self.RECHECK + 2.0
+        elif tv is not None:
+            self._retry = 0
         if tv is None or not p or p["id"] != self.current or p["paused"]:
             return
         drift = tv - p["t"]
         if abs(drift) > self.DRIFT:
-            self.bridge.send({"sync": round(tv + self.APPLY, 2), "syncId": self.current})
+            self._move_pc(tv + self.APPLY)
             log(f"aligned PC player to TV (was {drift:+.2f}s off)")
+
+    ECHO = 8.0       # seconds during which a seek the page reports near our own nudge is that nudge coming back
+
+    def _move_pc(self, target, paused=None):
+        """Put the muted PC player at `target` (and play or pause it) without the page echoing a seek to the TV."""
+        cmd = {"sync": round(target, 2), "syncId": self.current}
+        if paused is not None:
+            cmd["syncPaused"] = bool(paused)
+        self._nudge = (self.current, target, time.time())
+        self.bridge.send(cmd)
+
+    # ---- the Resync button -----------------------------------------------------
+    def request_resync(self):
+        """Ask for a resync (from the window or the phone). False if one is already running."""
+        if self.syncing:
+            return False
+        self.syncing = True
+        self.q.put({"kind": "resync"})
+        return True
+
+    def _say(self, text, ok=True, seconds=6):
+        self.note, self.note_until, self.note_ok = text, time.time() + seconds, ok
+        log(f"resync: {text}")
+
+    RESYNC_TOLERANCE = 0.4     # seconds: close enough that nobody could tell (a nudge lands within about 0.3)
+    RESYNC_ROUNDS = 3
+
+    def _resync(self, host):
+        """Line the PC's player and the TV up now, whichever way they drifted. Returns what to tell the user."""
+        pc = self.bridge.player()
+        st = Remote.state(host)
+        vid = Remote.playlet_now(host).get("videoid") or "" if st and st["app"] == "Playlet" else ""
+        action, why = resync_plan(st, vid, pc, self.current)
+        if action in ("nothing", "ad"):
+            return False, why
+        if action == "recast":                       # the TV lost the video: send it the PC's, where the PC is now
+            target = pc["t"] + (0 if pc["paused"] else self.lead)
+            t0 = time.time()
+            self._count(False, f"resync recast {pc['id']} at {target:.0f}s")
+            Remote.cast(host, pc["id"], target)
+            self.current, self.title = pc["id"], self.title if pc["id"] == self.current else pc["id"]
+            self._announce(self.title, self.current)
+            self.settle_until = t0 + self.SETTLE
+            if pc["paused"]:
+                self._ensure(host, "pause")
+            else:
+                self._started(host, target, t0)
+            self._nudge = None
+            return True, why
+        if action == "follow":                       # the TV moved on (autoplay, phone, remote): the PC opens its video
+            now = Remote.playlet_now(host)
+            pos = (st["pos"] if st else 0) + 4.0     # the page takes a few seconds to load and start
+            if st and st["dur"]:
+                pos = min(pos, max(0.0, st["dur"] - 5))
+            self.adopt(vid, now.get("title") or "")
+            self._announce(self.title, self.current)
+            self.bridge.send({"navigate": f"https://www.youtube.com/watch?v={urllib.parse.quote(vid, safe='')}"
+                                          f"&t={int(pos)}s"})
+            self._nudge = None
+            return True, why
+        if action == "buffering":                    # give the TV a moment to start before measuring it
+            end = time.time() + 6
+            while time.time() < end:
+                time.sleep(0.5)
+                st = Remote.state(host)
+                if st and st["state"] != "buffer":
+                    break
+            if not st or st["state"] == "buffer":
+                return False, why
+        return self._resync_align(host)
+
+    def _resync_align(self, host):
+        """Move the PC player onto the TV's timeline, then measure again and repeat: a YouTube seek lands a little late,
+        so one shot is rarely exact."""
+        first = None
+        for _ in range(self.RESYNC_ROUNDS):
+            st = Remote.state(host)
+            pc = self.bridge.player()
+            if not st or not pc or pc["id"] != self.current:
+                return False, "Lost track of one of the two players; try again"
+            if st["state"] == "pause":                 # nothing moves on the TV: its reading is exact
+                tv, tv_paused = st["pos"], True
+            else:
+                tv, tv_paused = self._tv_position(host), False
+                if tv is None:
+                    return False, "The TV isn't playing yet; try again in a moment"
+            pc = self.bridge.player()                  # re-read: measuring the TV took a moment
+            if not pc:
+                return False, "Lost track of the YouTube tab; try again"
+            drift = tv - pc["t"]
+            first = drift if first is None else first
+            if abs(drift) <= self.RESYNC_TOLERANCE and pc["paused"] == tv_paused:
+                break
+            self._move_pc(tv + (0 if tv_paused else self.APPLY), paused=tv_paused)
+            time.sleep(1.4)                            # the page applies it on its next poll, then settles
+        else:
+            pc, st = self.bridge.player(), Remote.state(host)
+            left = abs((st["pos"] if st else 0) - pc["t"]) if pc and st else 0
+            if left > 1.0:
+                return False, f"Moved the PC {abs(first or 0):.1f} s, but it is still about {left:.1f} s apart"
+        self._retry = 0
+        self.last_check = time.time()
+        if abs(first or 0) <= self.RESYNC_TOLERANCE:
+            return True, "Already in step"
+        return True, f"In step again (the PC was {abs(first):.1f} s {'behind' if first > 0 else 'ahead'})"
 
     def _ensure(self, host, want):
         """The Roku Play key toggles, so only press it when the TV is in the other state."""
@@ -979,277 +1169,12 @@ class Listener:
                     return
 
 
-BG, CARD, EDGE = "#000000", "#0e0e10", "#222226"
-FG, MUTED = "#f2f2f4", "#7d7d86"
-ACCENT, ACCENT_HI = "#ff4e45", "#ff6a62"
-GREEN, AMBER, RED, GREY = "#34d399", "#fbbf24", "#f87171", "#52525b"
+from ui_kit import (   # noqa: E402  (the look lives in ui_kit.py; re-exported here for the tests and the tabs)
+    ACCENT, ACCENT_HI, AMBER, AppTile, BG, CARD, Chip, DPad, Dot, EDGE, FG, FONT, FONT_MED, GREEN, GREY, IconButton, MUTED,
+    NavButton, PRESSED, ProgressBar, RAISED, RED, RoundButton, Slider, TabSwitch, Toggle, Tooltip, asset, dot_picture,
+    dark_titlebar, fit_text, oval, rounded, text_y,
+)
 BAR_H = 60
-
-
-def asset(name):
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "assets", name)
-
-
-def _load_fonts():
-    """Roboto (YouTube's UI font) is bundled and loaded privately, so nothing gets installed system-wide."""
-    try:
-        return all(ctypes.windll.gdi32.AddFontResourceExW(asset(f), 0x10, 0) > 0   # FR_PRIVATE
-                   for f in ("Roboto-Regular.ttf", "Roboto-Medium.ttf", "Roboto-Bold.ttf"))
-    except Exception:
-        return False
-
-
-_ROBOTO = _load_fonts()
-FONT = "Roboto" if _ROBOTO else "Segoe UI"
-FONT_MED = "Roboto Medium" if _ROBOTO else "Segoe UI Semibold"
-
-
-def text_y(font, cy):
-    """y for create_text so the text's capitals sit visually centered on cy (Tk centers the whole
-    ascent+descent box, which makes text look a pixel or two high next to icons)."""
-    f = tkfont.Font(font=font)
-    asc, desc = f.metrics("ascent"), f.metrics("descent")
-    return round(cy + (asc * 0.75) / 2 - asc / 2 + desc / 2)
-
-
-def rounded(canvas, x1, y1, x2, y2, r, **kw):
-    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2,
-           x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-    return canvas.create_polygon(pts, smooth=True, **kw)
-
-
-class RoundButton(tk.Canvas):
-    def __init__(self, parent, text, command, width=328, height=46):
-        super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
-        self.w, self.h, self.command = width, height, command
-        self.text, self.fill, self.fg, self.hover, self.enabled, self.hot = text, ACCENT, "#ffffff", ACCENT_HI, True, False
-        self.bind("<Enter>", lambda e: self._hot(True))
-        self.bind("<Leave>", lambda e: self._hot(False))
-        self.bind("<Button-1>", lambda e: self.enabled and self.command())
-        self.draw()
-
-    def _hot(self, on):
-        self.hot = on
-        self.draw()
-
-    def draw(self):
-        self.delete("all")
-        fill = self.hover if (self.hot and self.enabled) else self.fill
-        if not self.enabled:
-            fill = "#2a2a2e"
-        rounded(self, 1, 1, self.w - 1, self.h - 1, 14, fill=fill, outline="")
-        self.create_text(self.w / 2, self.h / 2, text=self.text, fill=self.fg if self.enabled else MUTED,
-                         font=(FONT, 11, "bold"))
-
-    def style(self, text, fill, hover, enabled=True):
-        self.text, self.fill, self.hover, self.enabled = text, fill, hover, enabled
-        self.draw()
-
-
-class IconButton(tk.Canvas):
-    """Small rounded button with a drawn icon: back, back10, rev, play, pause, fwd, fwd10, up, down, left,
-    right, ok. With repeat=True, holding it down repeats the command like a held remote button."""
-
-    REPEAT_DELAY, REPEAT_EVERY = 400, 140   # ms, roughly like holding a real Roku remote's arrow
-
-    def __init__(self, parent, kind, command, width=58, height=44, repeat=False):
-        super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
-        self.w, self.h, self.kind, self.command, self.hot = width, height, kind, command, False
-        self.repeat, self.down, self._job = repeat, False, None
-        self.bind("<Enter>", lambda e: self._hot(True))
-        self.bind("<Leave>", lambda e: (self._up(), self._hot(False)))
-        self.bind("<ButtonPress-1>", self._press)
-        self.bind("<ButtonRelease-1>", lambda e: self._up())
-        self.draw()
-
-    def _hot(self, on):
-        self.hot = on
-        self.draw()
-
-    def _press(self, e):
-        self.down = True
-        self.draw()
-        self.command()
-        if self.repeat:
-            self._job = self.after(self.REPEAT_DELAY, self._again)
-
-    def _again(self):
-        if self.down:
-            self.command()
-            self._job = self.after(self.REPEAT_EVERY, self._again)
-
-    def _up(self):
-        if self._job:
-            self.after_cancel(self._job)
-            self._job = None
-        if self.down:
-            self.down = False
-            self.draw()
-
-    def set_kind(self, kind):
-        if kind != self.kind:
-            self.kind = kind
-            self.draw()
-
-    def _tri(self, cx, cy, s, right):
-        d = s if right else -s
-        self.create_polygon(cx - d * 0.6, cy - s, cx - d * 0.6, cy + s, cx + d * 0.8, cy, fill=FG, outline="")
-
-    def draw(self):
-        self.delete("all")
-        fill = "#34343a" if self.down else "#26262b" if self.hot else "#151518"
-        rounded(self, 1, 1, self.w - 1, self.h - 1, 12, fill=fill, outline=EDGE)
-        cx, cy, k = self.w / 2, self.h / 2, self.kind
-        if k in ("up", "down"):   # same solid triangles as play / rev / fwd, turned upright
-            d = -1 if k == "up" else 1
-            self.create_polygon(cx - 8, cy - d * 4.5, cx + 8, cy - d * 4.5, cx, cy + d * 5.5, fill=FG, outline="")
-        elif k in ("left", "right"):
-            d = 1 if k == "right" else -1
-            self.create_polygon(cx - d * 4.5, cy - 8, cx - d * 4.5, cy + 8, cx + d * 5.5, cy, fill=FG, outline="")
-        elif k == "ok":
-            self.create_text(cx, cy, text="OK", fill=FG, font=(FONT, 11, "bold"))
-        elif k == "back":   # the Roku remote's U-turn arrow: points left on top, hooks down on the right
-            self.create_line(cx - 9, cy - 4, cx + 3, cy - 4, cx + 9, cy - 4, cx + 9, cy + 6, cx + 3, cy + 6,
-                             cx - 3, cy + 6, smooth=True, width=2.5, fill=FG, capstyle="round",
-                             arrow="first", arrowshape=(7, 8, 4))
-        elif k in ("back10", "fwd10"):
-            self.create_text(cx, cy, text=("−10" if k == "back10" else "+10"), fill=FG, font=(FONT, 11, "bold"))
-        elif k in ("rev", "fwd"):
-            right = k == "fwd"
-            self._tri(cx - 6, cy, 7, right)
-            self._tri(cx + 6, cy, 7, right)
-        elif k == "play":
-            self._tri(cx, cy, 9, True)
-        else:  # pause
-            for dx in (-6, 2):
-                self.create_rectangle(cx + dx, cy - 8, cx + dx + 5, cy + 8, fill=FG, outline="")
-
-
-class DPad(tk.Frame):
-    """The remote's arrows and OK as a cross of square buttons, styled like the transport row."""
-
-    # 3 x 54 + 2 x 8 = 178 px: the height of the status card + Connect + transport row it sits beside
-    def __init__(self, parent, send, size=54, gap=8):
-        super().__init__(parent, bg=BG)
-        self.buttons = {}
-        for kind, key, row, col in (("up", "Up", 0, 1), ("left", "Left", 1, 0), ("ok", "Select", 1, 1),
-                                    ("right", "Right", 1, 2), ("down", "Down", 2, 1)):
-            btn = IconButton(self, kind, lambda k=key: send(k), width=size, height=size,
-                             repeat=kind != "ok")   # OK doesn't auto-repeat on a Roku remote either
-            btn.grid(row=row, column=col, padx=(0 if col == 0 else gap, 0), pady=(0 if row == 0 else gap, 0))
-            self.buttons[key] = btn
-
-
-class Slider(tk.Canvas):
-    def __init__(self, parent, lo, hi, value, command, width=328, height=30):
-        super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
-        self.lo, self.hi, self.value, self.command, self.w, self.h = lo, hi, value, command, width, height
-        self.pad = 10
-        self.mark = 100          # where to draw the 100% tick (None for none)
-        self.dragging = False    # true while the mouse is held on it, so live updates don't fight your hand
-        self.bind("<Button-1>", self._drag)
-        self.bind("<B1-Motion>", self._drag)
-        self.bind("<ButtonRelease-1>", lambda e: setattr(self, "dragging", False))
-        self.draw()
-
-    def set_range(self, lo, hi, value, mark=None):
-        """Change what the slider measures (PC volume 0-200% vs the TV's 0-100) without calling `command`."""
-        self.lo, self.hi, self.mark = lo, hi, mark
-        self.value = max(lo, min(hi, value))
-        self.draw()
-
-    def get(self):
-        return self.value
-
-    def set(self, v):
-        self.value = max(self.lo, min(self.hi, v))
-        self.draw()
-
-    def _drag(self, e):
-        self.dragging = True
-        span = self.w - 2 * self.pad
-        frac = (e.x - self.pad) / span
-        self.set(round(self.lo + frac * (self.hi - self.lo)))
-        self.command(self.value)
-
-    def draw(self):
-        self.delete("all")
-        span = self.w - 2 * self.pad
-        x = self.pad + span * (self.value - self.lo) / (self.hi - self.lo)
-        y = self.h / 2
-        self.create_line(self.pad, y, self.w - self.pad, y, fill="#2a2a2e", width=4, capstyle="round")
-        # mark 100% so the boost range is obvious
-        if self.mark is not None:
-            x100 = self.pad + span * (self.mark - self.lo) / (self.hi - self.lo)
-            self.create_line(x100, y - 7, x100, y + 7, fill="#3a3a40", width=1)
-        self.create_line(self.pad, y, x, y, fill=ACCENT, width=4, capstyle="round")
-        self.create_oval(x - 8, y - 8, x + 8, y + 8, fill="#ffffff", outline=BG, width=2)
-
-
-class TabSwitch(tk.Canvas):
-    """Segmented control: a dark pill with the active segment raised."""
-
-    def __init__(self, parent, names, command, seg_w=104, height=34):
-        super().__init__(parent, width=seg_w * len(names) + 8, height=height, bg=BG, highlightthickness=0,
-                         cursor="hand2")
-        self.names, self.command, self.seg_w, self.h = names, command, seg_w, height
-        self.active, self.hot = names[0], None
-        self.bind("<Button-1>", lambda e: self._pick(e.x))
-        self.bind("<Motion>", lambda e: self._hover(self._at(e.x)))
-        self.bind("<Leave>", lambda e: self._hover(None))
-        self.draw()
-
-    def _at(self, x):
-        i = int((x - 4) // self.seg_w)
-        return self.names[i] if 0 <= i < len(self.names) else None
-
-    def _hover(self, name):
-        if name != self.hot:
-            self.hot = name
-            self.draw()
-
-    def _pick(self, x):
-        name = self._at(x)
-        if name:
-            self.command(name)
-
-    def set(self, name):
-        self.active = name
-        self.draw()
-
-    def draw(self):
-        self.delete("all")
-        rounded(self, 0, 0, int(self["width"]), self.h, 12, fill="#121215", outline="")
-        for i, name in enumerate(self.names):
-            x1 = 4 + i * self.seg_w
-            if name == self.active:
-                rounded(self, x1, 4, x1 + self.seg_w, self.h - 4, 9, fill="#26262c", outline="")
-            color = FG if name == self.active else ("#b4b4bc" if name == self.hot else MUTED)
-            font = (FONT_MED, 10)
-            self.create_text(x1 + self.seg_w / 2, text_y(font, self.h / 2), text=name, fill=color, font=font)
-
-
-class Toggle(tk.Canvas):
-    """iOS-style switch."""
-
-    def __init__(self, parent, on, command, width=46, height=26):
-        super().__init__(parent, width=width, height=height, bg=BG, highlightthickness=0, cursor="hand2")
-        self.on, self.command, self.w, self.h = on, command, width, height
-        self.bind("<Button-1>", lambda e: self._flip())
-        self.draw()
-
-    def _flip(self):
-        self.on = not self.on
-        self.draw()
-        self.command(self.on)
-
-    def draw(self):
-        self.delete("all")
-        r = self.h / 2
-        rounded(self, 1, 1, self.w - 1, self.h - 1, r - 1, fill=ACCENT if self.on else "#2a2a30", outline="")
-        cx = self.w - r if self.on else r
-        self.create_oval(cx - r + 4, 4, cx + r - 4, self.h - 4, fill="#ffffff", outline="")
 
 
 # Tk keysym -> Roku ECP key for the non-text keys the Type box forwards; the value's glyph is shown as feedback
@@ -1356,67 +1281,6 @@ class TypeBox(tk.Frame):
         else:
             self.hint.config(text="Search and sign-in boxes, Ctrl+V pastes", fg=MUTED)
         self.config(highlightbackground=GREEN if self.tv is not None and not focused else EDGE)
-
-
-class NavButton(tk.Canvas):
-    """Small round browser button: back, fwd, reload."""
-
-    def __init__(self, parent, kind, command, size=34):
-        super().__init__(parent, width=size, height=size, bg=BG, highlightthickness=0, cursor="hand2")
-        self.kind, self.command, self.s, self.hot = kind, command, size, False
-        self.bind("<Enter>", lambda e: self._set(True))
-        self.bind("<Leave>", lambda e: self._set(False))
-        self.bind("<Button-1>", lambda e: self.command())
-        self.draw()
-
-    def _set(self, hot):
-        self.hot = hot
-        self.draw()
-
-    def draw(self):
-        self.delete("all")
-        s, c = self.s, self.s / 2
-        if self.hot:
-            self.create_oval(1, 1, s - 1, s - 1, fill="#1e1e23", outline="")
-        col = FG if self.hot else "#a8a8b0"
-        if self.kind in ("back", "fwd"):
-            d = -1 if self.kind == "back" else 1
-            self.create_line(c - 3 * d, c - 6, c + 3 * d, c, c - 3 * d, c + 6, fill=col, width=2,
-                             capstyle="round", joinstyle="round")
-        else:  # reload: open arc + arrow head
-            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=60, extent=290, style="arc", outline=col, width=2)
-            self.create_polygon(c + 3, c - 10, c + 8, c - 5, c + 2, c - 3, fill=col, outline="")
-
-
-class AppTile(tk.Canvas):
-    """One quick-launch tile: the app's picture (or its name until the picture arrives). Click opens it on the TV,
-    right-click offers to unpin it."""
-
-    W, H = 85, 56
-
-    def __init__(self, parent, label, command, image=None, on_menu=None, accent=False):
-        super().__init__(parent, width=self.W, height=self.H, bg=BG, highlightthickness=0, cursor="hand2")
-        self.label, self.command, self.image, self.on_menu, self.accent, self.hot = label, command, image, on_menu, accent, False
-        self.bind("<Enter>", lambda e: self._hot(True))
-        self.bind("<Leave>", lambda e: self._hot(False))
-        self.bind("<Button-1>", lambda e: self.command())
-        if on_menu:
-            self.bind("<Button-3>", lambda e: self.on_menu(e))
-        self.draw()
-
-    def _hot(self, on):
-        self.hot = on
-        self.draw()
-
-    def draw(self):
-        self.delete("all")
-        rounded(self, 1, 1, self.W - 1, self.H - 1, 12, fill="#26262b" if self.hot else CARD,
-                outline=ACCENT if self.hot else EDGE)
-        if self.image is not None:
-            self.create_image(self.W / 2, self.H / 2, image=self.image)
-        else:
-            self.create_text(self.W / 2, self.H / 2, text=self.label, fill=ACCENT_HI if self.accent else FG,
-                             font=(FONT_MED, 9), width=self.W - 14, justify="center")
 
 
 class AppRow(tk.Frame):
@@ -1552,6 +1416,7 @@ class AppRow(tk.Frame):
         """A list of everything on the Roku, to open an app or pin it to the tiles."""
         win = tk.Toplevel(self)
         win.title("Roku apps")
+        dark_titlebar(win)
         win.configure(bg=BG)
         win.transient(self.winfo_toplevel())
         win.geometry("340x440")
@@ -1620,6 +1485,9 @@ class PhoneBackend:
         app, web = self.app, self.app.web
         vol = {"where": "pc", "level": app.pc_volume, "muted": False} if app.listener else               {"where": "tv", "level": app.tvvol.level, "muted": app.tvvol.muted}
         note = web.phone_note()
+        sn = app.sync
+        if sn.note and time.time() < sn.note_until:             # what the Resync button just did
+            note = (sn.note, sn.note_ok)
         return {"tv": app.last_tv, "now": self.now(app.last_tv), "volume": vol, "watching": web.phone_watching(),
                 "note": {"text": note[0], "ok": note[1]} if note else None}
 
@@ -1634,12 +1502,12 @@ class PhoneBackend:
             dur = sync.dur or (tv["dur"] + off if tv["dur"] else 0)
             title = watching["title"] or web.guard.snapshot()["title"] or "Web video"
             return {"source": "web", "app": "Web", "title": title, "state": tv["state"], "pos": tv["pos"] + off,
-                    "dur": dur, "seekable": bool(dur) and not sync.live}
+                    "dur": dur, "seekable": bool(dur) and not sync.live, "pc": True}
         if tv["app"] == "Playlet":
             return {"source": "youtube", "app": "YouTube", "title": self._playlet_title(), "state": tv["state"],
-                    "pos": tv["pos"], "dur": tv["dur"], "seekable": tv["dur"] > 0}
+                    "pos": tv["pos"], "dur": tv["dur"], "seekable": tv["dur"] > 0, "pc": True}
         return {"source": "tv", "app": tv["app"] or "Roku", "title": tv["app"] or "Roku", "state": tv["state"],
-                "pos": tv["pos"], "dur": tv["dur"], "seekable": False}
+                "pos": tv["pos"], "dur": tv["dur"], "seekable": False, "pc": False}   # pc: can it also be watched on the PC
 
     def _playlet_title(self):
         """The YouTube video's title: Playlet's own entry, else looked up by id. Cached so polling stays cheap."""
@@ -1661,6 +1529,47 @@ class PhoneBackend:
             title = known[vid]
         self._yt_cache = (now, title or "YouTube")
         return self._yt_cache[1]
+
+    PC_LEAD = 4.0        # seconds the page takes to load and start: the PC opens that far past where the TV is
+
+    def watch_on_pc(self):
+        """Also show what the TV is playing on the PC, so it can be watched on both screens. A Web cast is already in the
+        Web tab's browser, so that tab is brought up; a YouTube video is opened in the YouTube tab at the TV's position.
+        Returns the message for the phone."""
+        app = self.app
+        now = self.now(app.last_tv)
+        if not now:
+            raise ValueError("Nothing is playing on the TV.")
+        if now["source"] == "web":
+            app.after(0, app.show_web_on_pc)
+            return "On the PC's Web tab now, following the TV"
+        if now["source"] == "youtube":
+            vid = Remote.playlet_now(app._host).get("videoid") or ""
+            if not vid:
+                raise ValueError("Couldn't tell which YouTube video is playing.")
+            if app.chrome.alive() and not app.bridge.connected():
+                raise ValueError("The PC's YouTube tab isn't linked to CapoCast (reload the extension in Chrome).")
+            pos = now["pos"] + self.PC_LEAD
+            if now["dur"]:
+                pos = min(pos, max(0.0, now["dur"] - 5))
+            app.after(0, lambda: app.watch_youtube_on_pc(vid, now["title"], pos))
+            return "Opening it on the PC" + (", in step with the TV" if app.autocast else " (Auto-cast is off, so it won't stay in step)")
+        raise ValueError(f"{now['app']} can't be opened on the PC. Only YouTube and Web casts can.")
+
+    def resync(self):
+        """The phone's Resync button: line the PC's YouTube player up with the TV again. Returns the message for the phone;
+        what it found and did shows up in the phone's note a moment later."""
+        app = self.app
+        now = self.now(app.last_tv)
+        if not now or now["source"] != "youtube":
+            raise ValueError("Resync is for a YouTube video playing on the TV.")
+        if not app.autocast:
+            raise ValueError("Turn Auto-cast on in CapoCast first: it is what links the PC's player to the TV.")
+        if not app.bridge.connected():
+            raise ValueError("The PC's YouTube tab isn't linked to CapoCast (reload the extension in Chrome).")
+        if not app.sync.request_resync():
+            return "Already resyncing"
+        return "Resyncing the PC with the TV…"
 
     def seek_to(self, t):
         app, web = self.app, self.app.web
@@ -1791,24 +1700,28 @@ class HealthWindow(tk.Toplevel):
                            ("stalls", "Stalls"), ("audio", "Audio")):
             row = tk.Frame(card, bg=CARD)
             row.pack(fill="x", padx=14, pady=5)
-            dot = tk.Canvas(row, width=10, height=10, bg=CARD, highlightthickness=0)
+            dot = Dot(row, 10, CARD)
             dot.pack(side="left", pady=2)
-            item = dot.create_oval(1, 1, 9, 9, fill=GREY, outline="")
+            item = None
             tk.Label(row, text=label, bg=CARD, fg=MUTED, font=(FONT, 10), width=13, anchor="w").pack(side="left", padx=(8, 0))
             text = tk.Label(row, bg=CARD, fg=FG, font=(FONT, 10), anchor="w", justify="left", wraplength=340)
             text.pack(side="left", fill="x", expand=True)
             self.rows[key] = (dot, item, text)
+        self.copy_btn = RoundButton(self, "Copy report", self.copy, width=140, height=36)
+        self.copy_btn.pack(side="bottom", anchor="e", padx=18, pady=12)       # packed first, so a long list can't push it out
         tk.Label(self, text="Recent", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w", padx=18, pady=(12, 2))
         self.recent = tk.Label(self, bg=BG, fg=FG, font=("Consolas", 9), anchor="nw", justify="left", wraplength=520)
         self.recent.pack(fill="both", expand=True, padx=18)
-        RoundButton(self, "Copy report", self.copy, width=140, height=36).pack(anchor="e", padx=18, pady=12)
         self._playlet = ("", 0.0)             # (answer, when asked): Playlet's own server only answers while it is on screen
         self._asking = False
         self.after(50, self.refresh)
+        dark_titlebar(self)
 
     def copy(self):
         self.clipboard_clear()
         self.clipboard_append(self.app.health_report())
+        self.copy_btn.style("Copied", ACCENT, ACCENT_HI)
+        self.after(1600, lambda: self.copy_btn.winfo_exists() and self.copy_btn.style("Copy report", ACCENT, ACCENT_HI))
 
     def _ask_playlet(self):
         if self._asking or time.time() - self._playlet[1] < 5:
@@ -1827,8 +1740,8 @@ class HealthWindow(tk.Toplevel):
         threading.Thread(target=run, daemon=True).start()
 
     def _set(self, key, color, text):
-        dot, item, label = self.rows[key]
-        dot.itemconfigure(item, fill=color)
+        dot, _unused, label = self.rows[key]
+        dot.set(color)
         label.config(text=text)
 
     def refresh(self):
@@ -1873,8 +1786,14 @@ class App(tk.Tk):
         self.configure(bg=BG)
         cfg = self._load()
         w, h = 1280, 800
-        self.geometry(f"{w}x{h}+{max(0, (self.winfo_screenwidth() - w) // 2)}+{max(0, (self.winfo_screenheight() - h) // 2 - 20)}")
-        self.minsize(900, 600)
+        where = restore_geometry(cfg.get("window"), virtual_screen()) if virtual_screen() else None
+        if where:
+            self.geometry(f"{where[0]}x{where[1]}+{where[2]}+{where[3]}")
+            self._normal_geo = where[:4]
+        else:
+            self.geometry(f"{w}x{h}+{max(0, (self.winfo_screenwidth() - w) // 2)}+{max(0, (self.winfo_screenheight() - h) // 2 - 20)}")
+        self.minsize(MIN_W, MIN_H)
+        self.bind("<Configure>", self._note_geometry, add="+")
         self.listener = None
         self.host = tk.StringVar(value=cfg.get("host", DEFAULT_HOST))
         self.delay = tk.StringVar(value=str(cfg.get("delay", 500)))
@@ -1922,7 +1841,8 @@ class App(tk.Tk):
         self.phone_store = phone_store.PhoneStore(PHONE_STORE)
         ui = SimpleNamespace(BG=BG, CARD=CARD, EDGE=EDGE, FG=FG, MUTED=MUTED, ACCENT=ACCENT, ACCENT_HI=ACCENT_HI,
                              GREEN=GREEN, AMBER=AMBER, RED=RED, GREY=GREY, FONT=FONT, FONT_MED=FONT_MED,
-                             RoundButton=RoundButton, NavButton=NavButton, Remote=Remote, log=log)
+                             RoundButton=RoundButton, NavButton=NavButton, Chip=Chip, Tooltip=Tooltip,
+                             dark_titlebar=dark_titlebar, Remote=Remote, log=log)
         self.web = web_tab.WebTab(self, self.pages["Web"], ui, cfg.get("web_home"), cfg.get("web_upscale"), self.discord,
                                  subs=cfg.get("web_subs", ""))
         self.page = None
@@ -1937,12 +1857,15 @@ class App(tk.Tk):
             self._phone_start()
 
         self.protocol("WM_DELETE_WINDOW", self.close)
+        if where and where[4]:
+            self.state("zoomed")
         if "--autoconnect" in sys.argv:
             self.after(500, self.connect)
         self.update()
         self._dark_titlebar()
         self._poll()
         self._yt_tick()
+        self._yt_focus_tick()
         self._status_tick()
 
     # ---- layout ----------------------------------------------------------
@@ -1952,39 +1875,59 @@ class App(tk.Tk):
         self.bar = bar
         cy = BAR_H // 2
 
-        # brand: real YouTube icon + wordmark, sharing one centerline
+        # brand: the CapoCast mark + wordmark, sharing one centerline
         self._logo = ImageTk.PhotoImage(Image.open(asset("capocast.png")).resize((30, 30), Image.LANCZOS))
         bar.create_image(22, cy, image=self._logo, anchor="w")
         brand = (FONT, 13, "bold")
         bar.create_text(60, text_y(brand, cy), text="CapoCast", anchor="w", fill=FG, font=brand)
 
         self.tabs = TabSwitch(bar, ["Listen", "YouTube", "Web"], self._show, seg_w=88)
-        bar.create_window(194, cy, window=self.tabs, anchor="w")
+        bar.create_window(170, cy, window=self.tabs, anchor="w")
 
         # browser nav sits next to the tabs, like a browser's toolbar
         self.yt_items = []
-        x = 194 + int(self.tabs["width"]) + 18
+        x = 170 + int(self.tabs["width"]) + 18
         for kind, cmd in (("back", lambda: self.bridge.send({"history": -1})),
                           ("fwd", lambda: self.bridge.send({"history": 1})),
                           ("reload", lambda: self.bridge.send({"reload": True}))):
             self.yt_items.append(bar.create_window(x, cy, window=NavButton(bar, kind, cmd), anchor="w"))
             x += 36
+        self._bar_left = x + 16      # the status text may not run further left than this
 
-        # right side: sync status, then the Auto-cast switch
+        # far right, on every tab: the Phone remote and the Connection health panel (its dot shows the TV's reachability)
+        self.phone_btn = NavButton(bar, "phone", self.open_phone)
+        self.health_btn = NavButton(bar, "pulse", self.open_health)
+        self.kb_btn = NavButton(bar, "keyboard", self.toggle_typebox)      # shows / hides the Type on TV box
+        self.phone_item = bar.create_window(0, cy, window=self.phone_btn, anchor="e")
+        self.health_item = bar.create_window(0, cy, window=self.health_btn, anchor="e")
+        self.kb_item = bar.create_window(0, cy, window=self.kb_btn, anchor="e")
+        Tooltip(self.kb_btn, "Type on TV: show or hide the typing box (search and sign-in boxes, Ctrl+V pastes)")
+        Tooltip(self.phone_btn, "Phone remote: control the TV from your phone")
+        Tooltip(self.health_btn, "Connection health: what stalled, and who froze")
+
+        # then, on the YouTube tab: the Auto-cast and Discord switches, Resync, and the sync status
         label = (FONT_MED, 10)
+        self.ic_div = bar.create_line(0, cy - 11, 0, cy + 11, fill=EDGE)
         self.auto_toggle = Toggle(bar, self.autocast, self._set_autocast)
         self.r_toggle = bar.create_window(0, cy, window=self.auto_toggle, anchor="e")
         self.r_label = bar.create_text(0, text_y(label, cy), text="Auto-cast", anchor="e", fill="#d4d4da", font=label)
         self.r_div = bar.create_line(0, cy - 11, 0, cy + 11, fill=EDGE)
-        status = (FONT, 9)
-        self.r_status = bar.create_text(0, text_y(status, cy), text="", anchor="e", fill=MUTED, font=status)
-        self.r_dot = bar.create_oval(0, 0, 0, 0, fill=GREY, outline="")
         self.dc_toggle = Toggle(bar, self.discord.enabled.get("youtube", False), self._set_discord_youtube)
         self.dc_win = bar.create_window(0, cy, window=self.dc_toggle, anchor="e")
         self.dc_label = bar.create_text(0, text_y(label, cy), text="Discord", anchor="e", fill="#d4d4da", font=label)
         self.dc_div = bar.create_line(0, cy - 11, 0, cy + 11, fill=EDGE)
-        self.yt_items += [self.r_toggle, self.r_label, self.r_div, self.dc_win, self.dc_label, self.dc_div,
-                          self.r_status, self.r_dot]
+        self.resync_chip = Chip(bar, "Resync", self._resync)
+        self._rs_text = "Resync"
+        self.rs_win = bar.create_window(0, cy, window=self.resync_chip, anchor="e")
+        status = (FONT, 9)
+        self._status_text, self._status_font = "", status
+        self.r_status = bar.create_text(0, text_y(status, cy), text="", anchor="e", fill=MUTED, font=status)
+        self.r_dot = bar.create_image(0, cy, image=dot_picture(bar, 8, GREY), anchor="e")
+        Tooltip(self.auto_toggle, "Auto-cast: whatever you play in the YouTube tab also plays on the TV")
+        Tooltip(self.dc_toggle, "Show what you're watching on Discord")
+        Tooltip(self.resync_chip, "Line the video up on this PC and the TV again, and match play / pause")
+        self.yt_items += [self.ic_div, self.r_toggle, self.r_label, self.r_div, self.dc_win, self.dc_label, self.dc_div,
+                          self.rs_win, self.r_status, self.r_dot]
         self.hairline = bar.create_line(0, BAR_H - 1, 0, BAR_H - 1, fill=EDGE)
         bar.bind("<Configure>", lambda e: self._layout_bar(e.width))
 
@@ -1993,6 +1936,14 @@ class App(tk.Tk):
         width = width or bar.winfo_width()
         bar.coords(self.hairline, 0, BAR_H - 1, width, BAR_H - 1)
         x = width - 20
+        bar.coords(self.phone_item, x, cy)
+        x -= int(self.phone_btn["width"]) + 2
+        bar.coords(self.health_item, x, cy)
+        x -= int(self.health_btn["width"]) + 2
+        bar.coords(self.kb_item, x, cy)
+        x -= int(self.kb_btn["width"]) + 14
+        bar.coords(self.ic_div, x, cy - 11, x, cy + 11)
+        x -= 16
         bar.coords(self.r_toggle, x, cy)
         x -= int(self.auto_toggle["width"]) + 10
         bar.coords(self.r_label, x, bar.coords(self.r_label)[1])
@@ -2005,38 +1956,60 @@ class App(tk.Tk):
         x -= tkfont.Font(font=bar.itemcget(self.dc_label, "font")).measure("Discord") + 16
         bar.coords(self.dc_div, x, cy - 11, x, cy + 11)
         x -= 16
+        bar.coords(self.rs_win, x, cy)
+        x -= int(self.resync_chip["width"]) + 18
+        # the status text takes what room is left (so a long title is shortened, never run into the nav buttons)
+        text = fit_text(self._status_font, self._status_text, x - self._bar_left - 16)
+        bar.itemconfigure(self.r_status, text=text)
         bar.coords(self.r_status, x, bar.coords(self.r_status)[1])
-        x -= tkfont.Font(font=bar.itemcget(self.r_status, "font")).measure(bar.itemcget(self.r_status, "text")) + 8
-        bar.coords(self.r_dot, x - 8, cy - 4, x, cy + 4)
+        x -= tkfont.Font(font=self._status_font).measure(text) + 8
+        bar.coords(self.r_dot, x, cy)
 
     def _set_sync_status(self, text, color):
-        self.bar.itemconfigure(self.r_status, text=text)
-        self.bar.itemconfigure(self.r_dot, fill=color)
+        self._status_text = text
+        self.bar.itemconfigure(self.r_dot, image=dot_picture(self.bar, 8, color))
         self._layout_bar()
 
     def _status_tick(self):
         """Top-bar sync status: extension connection + what's on the TV."""
+        sn = self.sync
+        want = "Syncing…" if sn.syncing else "Resync"
+        if want != self._rs_text:
+            self._rs_text = want
+            self.resync_chip.config(text=want)
         if self.bridge_error:
             self._set_sync_status("Port 8765 is busy - close other copies of CapoCast", RED)
+        elif sn.note and time.time() < sn.note_until:       # what the Resync button just did
+            self._set_sync_status(sn.note, GREEN if sn.note_ok else AMBER)
         elif not self.bridge.connected():
             if self.chrome.waiting():
-                self._set_sync_status("Starting YouTube\u2026", AMBER)
+                self._set_sync_status("Starting YouTube…", AMBER)
             elif not self.chrome.alive():
                 self._set_sync_status("YouTube isn't open", GREY)
             elif time.time() - getattr(self, "_embedded_at", 0) < 10:
-                self._set_sync_status("Connecting\u2026", AMBER)
+                self._set_sync_status("Connecting…", AMBER)
             else:
                 self._set_sync_status("Reload Playlet Cast in chrome://extensions", GREY)
         elif not self.autocast:
             self._set_sync_status("Auto-cast off", GREY)
-        elif self.sync.error:
-            self._set_sync_status(self.sync.error, RED)
-        elif self.sync.title:
-            t = self.sync.title
-            self._set_sync_status("On TV  ·  " + (t if len(t) <= 42 else t[:41] + "…"), GREEN)
+        elif sn.error:
+            self._set_sync_status(sn.error, RED)
+        elif sn.title:
+            self._set_sync_status("On TV  ·  " + sn.title, GREEN)
         else:
             self._set_sync_status("Ready  ·  pick a video", GREEN)
         self.after(700, self._status_tick)
+
+    def _resync(self):
+        """The Resync button: line the PC's player and the TV up again, whichever way they drifted."""
+        if not self.autocast:
+            return self.sync._say("Turn Auto-cast on first: it is what links this player to the TV", False)
+        if not self.bridge.connected():
+            return self.sync._say("The YouTube tab isn't linked to CapoCast yet", False)
+        if self.sync.request_resync():
+            self._rs_text = "Syncing…"
+            self.resync_chip.config(text="Syncing…")
+            self._layout_bar()
 
     def _build_listen(self, page):
         wrap = tk.Frame(page, bg=BG)
@@ -2051,9 +2024,8 @@ class App(tk.Tk):
         card.pack(fill="x")
         srow = tk.Frame(card, bg=CARD)
         srow.pack(fill="x", padx=16, pady=14)
-        self.dot = tk.Canvas(srow, width=12, height=12, bg=CARD, highlightthickness=0)
+        self.dot = Dot(srow, 12, CARD)
         self.dot.pack(side="left")
-        self.dot_item = self.dot.create_oval(1, 1, 11, 11, fill=GREY, outline="")
         tk.Label(srow, textvariable=self.status, bg=CARD, fg=FG, font=(FONT, 10), anchor="w",
                  wraplength=270, justify="left").pack(side="left", padx=(10, 0))
 
@@ -2075,10 +2047,14 @@ class App(tk.Tk):
             btn = self.play_btn if kind is None else IconButton(trow, kind, action, width=48)
             btn.pack(side="left", padx=(0 if i == 0 else 8, 0))   # 6 x 48 + 5 x 8 = 328, the column width
         self.now = tk.Label(col, text="Nothing playing", bg=BG, fg=MUTED, font=(FONT, 9), anchor="w")
-        self.now.pack(fill="x", pady=(8, 14))
+        self.now.pack(fill="x", pady=(8, 2))
+        self.progress = ProgressBar(col, self._seek_fraction)      # how far in; click to jump (YouTube in Playlet)
+        self.progress.pack(fill="x", pady=(0, 8))
         self.play_state, self._polling = "none", False
 
-        tk.Label(col, text="Type on TV", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
+        self.type_wrap = tk.Frame(col, bg=BG)       # packed only while the keyboard icon is on (see toggle_typebox)
+        self._type_visible, self._type_auto = False, False
+        tk.Label(self.type_wrap, text="Type on TV", bg=BG, fg=MUTED, font=(FONT, 10)).pack(anchor="w")
         self.keys = KeySender(lambda: self._host)
 
         # Remote column beside it (stacked below, it wouldn't fit the minimum window height). Same heading and
@@ -2096,7 +2072,7 @@ class App(tk.Tk):
         self.apps_row = AppRow(side, tv_apps.clean_pins(self._load().get("quick_apps")), self._set_pins,
                                lambda: self._host, log)
         self.apps_row.pack(anchor="w")
-        self.typebox = TypeBox(col, self.keys)
+        self.typebox = TypeBox(self.type_wrap, self.keys)
         self.typebox.pack(pady=(4, 16))
         # clicking anywhere else (except a text field) takes keyboard focus away from the Type box
         self.bind_all("<Button-1>", self._click_away, add="+")
@@ -2108,7 +2084,7 @@ class App(tk.Tk):
 
         # One volume control for whichever place the sound is going: this PC while audio is routed here (Connect),
         # the TV's own volume otherwise. It switches by itself when you connect or disconnect.
-        vrow = tk.Frame(col, bg=BG)
+        vrow = self.vol_row = tk.Frame(col, bg=BG)
         vrow.pack(fill="x")
         self.vol_title = tk.Label(vrow, text="Volume", bg=BG, fg=MUTED, font=(FONT, 10))
         self.vol_title.pack(side="left")
@@ -2129,13 +2105,21 @@ class App(tk.Tk):
         self.sound_label.pack(side="right")
         self.sound_scale = Slider(col, 0, SOUND_DELAY_MAX, self._buffer(), self._on_sound_delay)
         self.sound_scale.mark = None
+        self.sound_scale.draw()                  # it drew itself once already, with the 100% tick this slider doesn't have
         self.sound_scale.pack(pady=(4, 10))
         self.sound_label.config(text=f"{self._buffer()} ms")
+        Tooltip(self.sound_scale, "How late the sound plays on this PC. Drag it while watching until the lips match.")
 
         orow = tk.Frame(col, bg=BG)
         orow.pack(fill="x")
         self.host_entry = self._field(orow, "Roku IP", self.host, 15)
-        self.delay_entry = self._field(orow, "Delay ms", self.delay, 6, pad=(14, 0))
+        self.delay_entry = self._field(orow, "Roku buffer", self.delay, 6, pad=(14, 0))
+        Tooltip(self.delay_entry, "Milliseconds of sound the Roku holds back before sending it here. Higher = later "
+                                  "sound and fewer crackles. Applies the next time you press Connect.")
+        find = tk.Label(self.host_entry.master, text="Find", bg=BG, fg=ACCENT_HI, font=(FONT, 9, "bold"), cursor="hand2")
+        find.place(relx=1.0, y=0, anchor="ne")
+        find.bind("<Button-1>", lambda e: self._find_roku())
+        Tooltip(find, "Look for a Roku on your network, so you don't have to type its address")
         obox = tk.Frame(orow, bg=BG)
         obox.pack(side="left", padx=(14, 0), fill="x", expand=True)
         tk.Label(obox, text="Output", bg=BG, fg=MUTED, font=(FONT, 9)).pack(anchor="w")
@@ -2145,19 +2129,11 @@ class App(tk.Tk):
         self.out_lbl.bind("<Button-1>", self._pick_output)
         self._paint_output()
         self.buffer_hint = tk.Label(col, text="", bg=BG, fg=AMBER, font=(FONT, 9), anchor="w")
-        self.buffer_hint.pack(fill="x", pady=(6, 0))
         self._paint_buffer_hint()
-        phone = tk.Label(col, text="Phone remote", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
-        phone.pack(anchor="w", pady=(14, 0))
-        phone.bind("<Button-1>", lambda e: self.open_phone())
-        healthlink = tk.Label(col, text="Connection health", bg=BG, fg=MUTED, font=(FONT, 9, "underline"), cursor="hand2")
-        healthlink.pack(anchor="w", pady=(6, 0))
-        healthlink.bind("<Button-1>", lambda e: self.open_health())
 
     def _build_youtube(self, page):
         self.yt_page = page
         self.yt_msg = tk.Label(page, text="", bg=BG, fg=MUTED, font=(FONT, 11), cursor="")
-        self.yt_msg.place(relx=0.5, rely=0.45, anchor="center")
         self.yt_msg.bind("<Button-1>", lambda e: self._yt_reopen())
         page.bind("<Configure>", lambda e: self.chrome.fit(e.width, e.height))
 
@@ -2181,7 +2157,7 @@ class App(tk.Tk):
             elif not self.chrome.waiting():
                 self._yt_reopen()
         else:
-            self.chrome.show(False)
+            self._hide_chrome()
         # each tab hides the other's browser; the Web tab starts its own the first time it's opened
         if name == "Web":
             self.web.on_show()
@@ -2191,15 +2167,63 @@ class App(tk.Tk):
     # ---- YouTube (embedded Chrome) ----------------------------------------
     def _yt_message(self, text, clickable=False):
         self.yt_msg.config(text=text, fg=FG if clickable else MUTED, cursor="hand2" if clickable else "")
+        if text:
+            self.yt_msg.place(relx=0.5, rely=0.45, anchor="center")
+        else:
+            self.yt_msg.place_forget()    # an empty label still sat on top of the page, over a few pixels of the video
 
-    def _yt_reopen(self):
+    def _yt_reopen(self, url=None):
         if self.chrome.alive() or self.chrome.waiting():
             return
         self._yt_message("Opening YouTube…")
         try:
-            self.chrome.launch()
+            self.chrome.launch(url)
         except Exception as e:
             self._yt_message(f"{e}  ·  click to retry", clickable=True)
+
+    # ---- keyboard focus for the embedded Chrome -----------------------------
+    FOCUS_EVERY = 80       # ms between checks that the keyboard is where the user is looking
+
+    def _app_in_front(self):
+        try:
+            return ctypes.windll.user32.GetForegroundWindow() == ctypes.windll.user32.GetAncestor(self.winfo_id(), 2)
+        except Exception:
+            return False
+
+    def _hide_chrome(self):
+        """Another tab is showing: hide Chrome, and take the keyboard back if it had it (a hidden Chrome would keep it,
+        and the other tabs would hear nothing)."""
+        had_keys = self.chrome.has_focus()
+        self.chrome.show(False)
+        if had_keys:
+            self._focus_tk()
+
+    def _focus_tk(self):
+        """Give the keyboard back to the app's own window (SetFocus directly: Tk believes it already has it, so
+        focus_set would do nothing)."""
+        try:
+            if self._app_in_front():
+                ctypes.windll.user32.SetFocus(self.winfo_id())
+        except Exception as e:
+            log(f"focus error: {e!r}")
+
+    def _yt_focus_tick(self):
+        """While the YouTube tab is showing and the app is in front, keep the keyboard in Chrome. Clicking into the
+        embedded page doesn't move it there by itself, and Tk takes it back whenever the window is re-activated, so the
+        search box looked frozen."""
+        try:
+            if self.page == "YouTube" and self.chrome.alive() and self._app_in_front():
+                if time.time() >= getattr(self, "_yt_focus_retry", 0.0) and self.chrome.keep_focus():
+                    if self.chrome.has_focus():
+                        self._yt_focus_retry = 0.0
+                    else:                       # Chrome sent it somewhere else again: don't fight it every tick
+                        self._yt_focus_retry = time.time() + 1.0
+                        if time.time() - getattr(self, "_yt_focus_logged", 0.0) > 30:
+                            self._yt_focus_logged = time.time()
+                            log("youtube tab: Chrome would not take the keyboard focus")
+        except Exception as e:
+            log(f"focus error: {e!r}")
+        self.after(self.FOCUS_EVERY, self._yt_focus_tick)
 
     def _yt_tick(self):
         try:
@@ -2301,6 +2325,26 @@ class App(tk.Tk):
             log(f"discord: Playlet is playing {vid}, which the YouTube tab didn't start; showing it")
             self._yt_now(np.get("title") or "", vid)
 
+    # ---- watching on the PC as well as the TV (from the phone's "Also watch on the PC") -------------------
+    def watch_youtube_on_pc(self, video_id, title, pos):
+        """Open the video the TV is playing in the YouTube tab, `pos` seconds in. Runs on the Tk thread. With Auto-cast on
+        the page then follows the TV (muted, nudged onto the TV's timeline) like any video started here."""
+        url = f"https://www.youtube.com/watch?v={urllib.parse.quote(video_id, safe='')}&t={int(max(0, pos))}s"
+        self.sync.adopt(video_id, title)
+        if self.chrome.alive():
+            self.bridge.send({"navigate": url})
+        elif not self.chrome.waiting():
+            self._yt_reopen(url)
+        else:                                 # still opening: it picks the page up on its first poll
+            self.bridge.send({"navigate": url})
+        self._show("YouTube")
+        self._pop_up()
+
+    def show_web_on_pc(self):
+        """The Web tab's browser is already on the page being cast; this just brings it up. Runs on the Tk thread."""
+        self._show("Web")
+        self._pop_up()
+
     def autocast_off(self):
         """A Web-tab cast owns the TV now; stop the YouTube tab's auto-cast from taking it back."""
         if self.autocast:
@@ -2320,6 +2364,41 @@ class App(tk.Tk):
                 log(f"remote error: {e!r}")
             self._fetch(host)
         threading.Thread(target=work, daemon=True).start()
+
+    def _seek_fraction(self, frac):
+        st = self.last_tv
+        if st and st["dur"] and st["app"] == "Playlet":
+            self.progress.set(frac, True)
+            self._remote(Remote.seek_to, frac * st["dur"])
+
+    def _find_roku(self):
+        """Look for Rokus on the network (off the UI thread) and put the address in the box."""
+        self.apps_row.say("Looking for your Roku…")
+
+        def work():
+            found = roku_find.search()
+            self._after_safe(lambda: self._found_roku(found))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _found_roku(self, found):
+        if not found:
+            return self.apps_row.say("No Roku answered. Is it on, and on this Wi-Fi?", AMBER, 6)
+        if len(found) == 1 or self.listener:
+            return self._use_roku(found[0], len(found))
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=FG, activebackground=ACCENT, activeforeground="#ffffff", bd=0)
+        for ip in found:
+            menu.add_command(label=ip, command=lambda ip=ip: self._use_roku(ip, len(found)))
+        try:
+            menu.tk_popup(self.host_entry.winfo_rootx(), self.host_entry.winfo_rooty() + self.host_entry.winfo_height())
+        finally:
+            menu.grab_release()
+
+    def _use_roku(self, ip, count):
+        if self.listener:
+            return self.apps_row.say(f"Found a Roku at {ip}. Disconnect first to switch to it.", AMBER, 6)
+        self.host.set(ip)
+        self._save()
+        self.apps_row.say(f"Found a Roku at {ip}" + (f" (and {count - 1} more)" if count > 1 else ""), GREEN, 6)
 
     def _toggle_play(self):
         self.play_state = "pause" if self.play_state == "play" else "play"   # optimistic; next poll corrects it
@@ -2378,6 +2457,14 @@ class App(tk.Tk):
             time_txt = f"  ·  {fmt(st['pos'])} / {fmt(st['dur'])}" if st["dur"] else ""
             self.now.config(text=f"{st['app'] or 'Roku'}  ·  {label}{time_txt}")
         self.play_btn.set_kind("pause" if self.play_state == "play" else "play")
+        if st and st["state"] != "none" and st["dur"]:
+            self.progress.set(st["pos"] / st["dur"], st["app"] == "Playlet")
+        else:
+            self.progress.set(0.0, False)
+        health_btn = getattr(self, "health_btn", None)
+        if health_btn is not None and health_btn.badge != (GREEN if st else RED):   # the pulse icon's dot: is the TV there?
+            health_btn.badge = GREEN if st else RED
+            health_btn.draw()
         self.web.tv_state(st)
         self.on_tv_state(st)
         self.typebox.render()   # picks up typing errors reported by the sender thread
@@ -2396,7 +2483,7 @@ class App(tk.Tk):
 
     def _stray_key(self, e):
         """A key pressed on the Listen tab with nothing selected: hand it to the Type box."""
-        if e.widget is self and self.page == "Listen" and self.typebox.wants(e):
+        if e.widget is self and self.page == "Listen" and self._type_visible and self.typebox.wants(e):
             self.typebox.focus_set()
             result = self.typebox._key(e)
             self.after(1, self.typebox.render)   # draw the caret once focus has actually moved
@@ -2410,12 +2497,36 @@ class App(tk.Tk):
         except RuntimeError:   # window already closed
             pass
 
+    def toggle_typebox(self, on=None):
+        """The keyboard icon: show or hide the Type on TV box. Turning it on from another tab brings up the Listen tab,
+        where the box is, and puts the cursor in it."""
+        on = (not self._type_visible) if on is None else on
+        self._type_auto = False
+        if on == self._type_visible:
+            return
+        self._type_visible = on
+        self.kb_btn.active = on
+        self.kb_btn.draw()
+        if on:
+            self.type_wrap.pack(fill="x", before=self.vol_row)
+            self._show("Listen")
+            self.update_idletasks()
+            self.typebox.focus_set()
+            self.after(1, self.typebox.render)
+        else:
+            if self._focused() is self.typebox:
+                self.focus_set()
+            self.type_wrap.pack_forget()
+
     def _tv_keyboard(self, state):
         was_open = self.typebox.tv is not None
         self.typebox.set_tv(state)
         if state is not None and not was_open:
             log("TV keyboard opened")
             self._kb_from = self.page if self.page != "Listen" else None
+            auto = not self._type_visible
+            self.toggle_typebox(True)             # the TV is asking for text: the box has to be there
+            self._type_auto = auto                # ...and goes away again by itself if the user hadn't opened it
             self._show("Listen")
             self.typebox.focus_set()
             self.after(1, self.typebox.render)
@@ -2424,6 +2535,8 @@ class App(tk.Tk):
             log("TV keyboard closed")
             if self._focused() is self.typebox:
                 self.focus_set()
+            if self._type_auto:
+                self.toggle_typebox(False)
             if self._kb_from:
                 self._show(self._kb_from)
             self._kb_from = None
@@ -2464,6 +2577,19 @@ class App(tk.Tk):
             pass
 
     # ---- helpers ---------------------------------------------------------
+    def _note_geometry(self, e):
+        """Remember where the window sits while it is a normal window (a maximized one remembers where it came from)."""
+        if e.widget is self and self.state() == "normal":
+            m = re.match(r"(\d+)x(\d+)([+-]-?\d+)([+-]-?\d+)", self.geometry())
+            if m:
+                self._normal_geo = (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+
+    def _window_state(self):
+        geo = getattr(self, "_normal_geo", None)
+        if not geo:
+            return None
+        return {"w": geo[0], "h": geo[1], "x": geo[2], "y": geo[3], "zoomed": self.state() == "zoomed"}
+
     @staticmethod
     def _load():
         try:
@@ -2476,7 +2602,7 @@ class App(tk.Tk):
         try:
             with open(CONFIG, "w", encoding="utf-8") as f:
                 json.dump({"host": self.host.get().strip(), "delay": self._delay(), "buffer": self._buffer(),
-                           "volume": self.pc_volume,
+                           "volume": self.pc_volume, "window": self._window_state(),
                            "autocast": self.autocast, "audio_device": getattr(self, "audio_device", ""),
                            "quick_apps": getattr(getattr(self, "apps_row", None), "pins", None),
                            "web_home": getattr(getattr(self, "web", None), "home", None),
@@ -2556,6 +2682,7 @@ class App(tk.Tk):
         import segno
         win = self.phone_win = tk.Toplevel(self)
         win.title("Phone remote")
+        dark_titlebar(win)
         win.configure(bg=BG)
         win.transient(self)
         win.resizable(False, False)
@@ -2656,8 +2783,12 @@ class App(tk.Tk):
 
     def _paint_buffer_hint(self):
         b = self._buffer()
-        self.buffer_hint.config(text="" if b >= 250 else
-                                "Under 250 ms the TV's Wi-Fi pauses (about 1/4 s) can be heard as skips.")
+        short = b < 250
+        self.buffer_hint.config(text="Under 250 ms the TV's Wi-Fi pauses (about 1/4 s) can be heard as skips." if short else "")
+        if short:                                           # only takes up room while it has something to say
+            self.buffer_hint.pack(fill="x", pady=(6, 0))
+        else:
+            self.buffer_hint.pack_forget()
 
     def _on_sound_delay(self, value):
         """The Sound delay slider moved: later sound for a bigger number, applied at once and remembered."""
@@ -2719,7 +2850,7 @@ class App(tk.Tk):
     def _set_dot(self, text):
         color = GREEN if text.startswith("Connected") else AMBER if text.startswith("Connecting") \
             else GREY if text in ("Not connected", "Disconnected") else RED
-        self.dot.itemconfig(self.dot_item, fill=color)
+        self.dot.set(color)
 
     def set_status(self, text, ended=False):
         # called from worker threads: hop back to the Tk thread

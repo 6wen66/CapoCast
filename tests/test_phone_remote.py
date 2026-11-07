@@ -271,6 +271,7 @@ class AppBackend(unittest.TestCase):
                               phone_transport=lambda action, value=0: self.keys.append(("page", action, value)),
                               cancel_cast=lambda: self.after.append("cancel"), stop_casting=lambda: self.after.append("stop"))
         self.app = SimpleNamespace(
+            sync=SimpleNamespace(note="", note_until=0.0, note_ok=True),
             web=web, keys=SimpleNamespace(key=self.keys.append, text=lambda s: self.keys.append(("text", s))),
             tvvol=SimpleNamespace(level=30, muted=False), listener=None, pc_volume=100, last_tv={"state": "play", "app": "Netflix", "pos": 30.0, "dur": 600.0},
             _host="10.0.0.5", after=lambda ms, fn: fn(), _phone_pc_volume=lambda d: self.keys.append(("pc", d)))

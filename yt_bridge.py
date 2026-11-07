@@ -124,7 +124,7 @@ class Bridge:
         """Where the embedded player is (sent with every poll), stamped with when we heard it."""
         try:
             self._player = {"id": q["id"][0], "t": float(q["t"][0]), "paused": q.get("paused", ["0"])[0] == "1",
-                            "at": time.time()}
+                            "ad": q.get("ad", ["0"])[0] == "1", "at": time.time()}
         except (KeyError, ValueError):
             self._player = None
 
@@ -144,7 +144,7 @@ class Bridge:
         if not p or time.time() - p["at"] > 2:
             return None
         t = p["t"] if p["paused"] else p["t"] + (time.time() - p["at"])
-        return {"id": p["id"], "t": t, "paused": p["paused"]}
+        return {"id": p["id"], "t": t, "paused": p["paused"], "ad": p.get("ad", False)}
 
     def _pop_command(self):
         with self._lock:

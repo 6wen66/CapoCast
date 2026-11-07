@@ -12,6 +12,8 @@ from ctypes import wintypes
 
 user32 = ctypes.windll.user32
 user32.GetWindowLongW.restype = ctypes.c_long
+user32.GetFocus.restype = wintypes.HWND
+user32.IsChild.argtypes = [wintypes.HWND, wintypes.HWND]
 
 GWL_STYLE = -16
 WS_CHILD, WS_POPUP, WS_CAPTION, WS_THICKFRAME = 0x40000000, 0x80000000, 0x00C00000, 0x00040000
@@ -67,7 +69,8 @@ class ChromeEmbed:
         self._launched = 0.0
 
     # ---- launching -------------------------------------------------------
-    def launch(self, url="https://www.youtube.com/"):
+    def launch(self, url=None):
+        url = url or "https://www.youtube.com/"
         chrome = find_chrome()
         if not chrome:
             raise RuntimeError("Google Chrome isn't installed")
@@ -124,6 +127,26 @@ class ChromeEmbed:
     def focus(self):
         if self.alive():
             user32.SetFocus(self.hwnd)
+
+    def has_focus(self):
+        """True if keyboard focus is in the Chrome window (or one of its inner windows, which is where it usually lands).
+        A re-parented window shares the app's input queue, so GetFocus sees into it from the app's thread."""
+        if not self.alive():
+            return False
+        f = user32.GetFocus()
+        return bool(f) and (f == self.hwnd or bool(user32.IsChild(self.hwnd, f)))
+
+    def keep_focus(self):
+        """Put the keyboard in Chrome if it is somewhere else. -> True if it had to be moved.
+
+        Chrome, once re-parented, never takes focus by itself: clicking into the page leaves it with the app's own
+        window (and the app hands it back there whenever the window is re-activated), so keys went nowhere and the page
+        looked frozen. Moving it is harmless: it is the same input queue, so it never changes which window is in front.
+        """
+        if not self.alive() or self.has_focus():
+            return False
+        user32.SetFocus(self.hwnd)
+        return True
 
     def release(self):
         """Hand the window back to the desktop and close it (closing the app closes its YouTube)."""

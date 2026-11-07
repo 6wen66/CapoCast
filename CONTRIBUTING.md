@@ -47,7 +47,9 @@ To build the standalone `.exe`:
 
 | Path | What it does |
 |------|--------------|
-| `roku_listen_gui.py` | The desktop app: UI, private-listening audio, Roku remote, auto-cast sync engine |
+| `roku_listen_gui.py` | The desktop app: window, private-listening audio, Roku remote, auto-cast sync engine and Resync |
+| `ui_kit.py` | The look: colours, the bundled font, and the drawn widgets. Rounded shapes are anti-aliased pictures (`rounded`), so use it rather than Tk's own canvas shapes |
+| `roku_find.py` | Finds Rokus on the local network with SSDP (the **Find** button). Parsing is pure and unit tested |
 | `roku_listen.py` | Protocol helpers + a minimal command-line client (plays through `ffplay`) |
 | `yt_embed.py` | Launches Chrome in app mode and embeds its window in the YouTube tab |
 | `yt_bridge.py` | Local HTTP bridge (`127.0.0.1:8765`) between the app and the extension |
